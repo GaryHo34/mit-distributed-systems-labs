@@ -82,7 +82,7 @@ func (ck *Clerk) Get(key string) string {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
+		// ask controller for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
 
@@ -116,7 +116,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
+		// ask controller for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
 }
