@@ -33,19 +33,20 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
-func (c *Coordinator) GetWork(reply *WorkReply) error {
+func (c *Coordinator) GetWork(args *WorkArgs, reply *WorkReply) error {
 	c.mu.Lock()
 	if len(c.taskqueue) == 0 {
 		reply.HasWork = false
 		return nil
 	}
+	reply.HasWork = true
 	reply.Work = c.taskqueue[0]
 	c.taskqueue = c.taskqueue[1:]
 	c.mu.Unlock()
 	return nil
 }
 
-func (c *Coordinator) ReplyFinish(args *WorkArgs) error {
+func (c *Coordinator) ReplyFinish(args *WorkArgs, reply *WorkReply) error {
 	c.mu.Lock()
 	switch args.WorkType {
 	case MAP:

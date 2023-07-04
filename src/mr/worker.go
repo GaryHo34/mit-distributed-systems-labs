@@ -3,8 +3,11 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -26,10 +29,101 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	// a while(true) loop in go
+	for {
+		work := CallGetWok()
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+		if !work.HasWork {
+			//sleep for a 3 seconds
+			time.Sleep(3 * time.Second)
+			continue
+		}
 
+		if work.Work.WorkType == MAP {
+			DoMapWork(work.Work.MapWork, mapf)
+		}
+	}
+}
+
+func DoMapWork(work MapWork, mapf func(string, string) []KeyValue) {
+	filename := work.Filename
+	fmt.Println("DoMapWork: ", filename)
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+	}
+
+	content, err := ioutil.ReadAll(file)
+
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+
+	file.Close()
+
+	kva := mapf(work.Filename, string(content))
+
+	//make a
+	for i := 0; i < work.NReduce; i++ {
+		imtFilename := fmt.Sprintf("mr-%d-%d", work.FileIndex, i)
+
+		imtFile, err := ioutil.TempFile(".", imtFilename)
+
+		if err != nil {
+			log.Fatalf("cannot create %v", imtFilename)
+		}
+
+		for _, kv := range kva {
+			hash := ihash(kv.Key) % work.NReduce
+			if hash == i {
+				fmt.Fprintf(imtFile, "%v %v\n", kv.Key, kv.Value)
+			}
+		}
+
+		imtFile.Close()
+
+		os.Rename(imtFile.Name(), imtFilename)
+	}
+
+	CallReplyFinish(Work{
+		WorkType: MAP,
+		MapWork:  work,
+	})
+}
+
+func CallReplyFinish(w Work) WorkReply {
+	args := WorkArgs{}
+	reply := WorkReply{}
+
+	args.WorkType = w.WorkType
+
+	if w.WorkType == MAP {
+		args.MapWork = w.MapWork
+	} else {
+		args.ReduceWork = w.ReduceWork
+	}
+
+	args.IsSuccess = true
+
+	ok := call("Coordinator.ReplyFinish", &args, &reply)
+
+	if !ok {
+		fmt.Printf("call failed!\n")
+	}
+
+	return reply
+}
+
+func CallGetWok() WorkReply {
+	args := WorkArgs{}
+	reply := WorkReply{}
+	ok := call("Coordinator.GetWork", &args, &reply)
+
+	if !ok {
+		fmt.Printf("call failed!\n")
+	}
+
+	return reply
 }
 
 // example function to show how to make an RPC call to the coordinator.
