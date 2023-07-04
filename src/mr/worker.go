@@ -1,14 +1,24 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
 )
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -41,8 +51,70 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		if work.Work.WorkType == MAP {
 			DoMapWork(work.Work.MapWork, mapf)
+		} else {
+			DoReduceWork(work.Work.ReduceWork, reducef)
 		}
 	}
+}
+
+func DoReduceWork(work ReduceWork, reducef func(string, []string) string) {
+	fileIndex := work.ReduceIndex
+	nMapWork := work.NMapWork
+
+	intermediate := []KeyValue{}
+	for i := 0; i < nMapWork; i++ {
+		filename := fmt.Sprintf("mr-%d-%d", i, fileIndex)
+		file, err := os.Open(filename)
+
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+
+		dec := json.NewDecoder(file)
+
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	oname := fmt.Sprintf("mr-out-%d", fileIndex)
+	ofile, _ := ioutil.TempFile("./mr-tmp/", oname)
+
+	//
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-0.
+	//
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	os.Rename(ofile.Name(), "./mr-tmp/"+oname)
+
+	CallReplyFinish(Work{
+		WorkType:   REDUCE,
+		ReduceWork: work,
+	})
 }
 
 func DoMapWork(work MapWork, mapf func(string, string) []KeyValue) {
@@ -69,6 +141,8 @@ func DoMapWork(work MapWork, mapf func(string, string) []KeyValue) {
 
 		imtFile, err := ioutil.TempFile(".", imtFilename)
 
+		enc := json.NewEncoder(imtFile)
+
 		if err != nil {
 			log.Fatalf("cannot create %v", imtFilename)
 		}
@@ -76,7 +150,10 @@ func DoMapWork(work MapWork, mapf func(string, string) []KeyValue) {
 		for _, kv := range kva {
 			hash := ihash(kv.Key) % work.NReduce
 			if hash == i {
-				fmt.Fprintf(imtFile, "%v %v\n", kv.Key, kv.Value)
+				err := enc.Encode(&kv)
+				if err != nil {
+					log.Fatalf("cannot encode %v", kv)
+				}
 			}
 		}
 

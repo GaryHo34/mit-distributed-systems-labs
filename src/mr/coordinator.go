@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -17,10 +18,10 @@ type WorkDetail struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	mu         sync.Mutex      // an internal lock
-	taskqueue  []Work          // a taskqueue
-	reduceWork map[int]bool    // a record if reduceWork all success
-	mapWork    map[string]bool // a record if  mapwork all success
+	mu         sync.Mutex            // an internal lock
+	taskqueue  []Work                // a taskqueue
+	reduceWork map[int]WorkStatus    // a record if reduceWork all success
+	mapWork    map[string]WorkStatus // a record if  mapwork all success
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -33,16 +34,68 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
-func (c *Coordinator) GetWork(args *WorkArgs, reply *WorkReply) error {
+func (c *Coordinator) Timer(w Work) {
+	time.Sleep(10 * time.Second)
 	c.mu.Lock()
+	switch w.WorkType {
+	case MAP:
+		if c.mapWork[w.MapWork.Filename] != FINISHED {
+			c.taskqueue = append(c.taskqueue, w)
+			c.mapWork[w.MapWork.Filename] = NOTSTART
+		}
+	case REDUCE:
+		if c.reduceWork[w.ReduceWork.ReduceIndex] != FINISHED {
+			c.taskqueue = append(c.taskqueue, w)
+			c.reduceWork[w.ReduceWork.ReduceIndex] = NOTSTART
+		}
+	}
+	c.mu.Unlock()
+}
+
+func (c *Coordinator) CheckMapWork() {
+	ret := true
+	for _, v := range c.mapWork {
+		ret = ret && (v == FINISHED)
+	}
+	if !ret {
+		return
+	}
+	c.mu.Lock()
+	fmt.Println("All map work finished")
+	fmt.Println("Start reduce work")
+	for i := 0; i < len(c.reduceWork); i++ {
+		c.taskqueue = append(c.taskqueue, Work{
+			WorkType: REDUCE,
+			ReduceWork: ReduceWork{
+				ReduceIndex: i,
+				NMapWork:    len(c.mapWork),
+			},
+		})
+	}
+	c.mu.Unlock()
+}
+
+func (c *Coordinator) GetWork(args *WorkArgs, reply *WorkReply) error {
 	if len(c.taskqueue) == 0 {
 		reply.HasWork = false
 		return nil
 	}
-	reply.HasWork = true
-	reply.Work = c.taskqueue[0]
+	c.mu.Lock()
+	w := c.taskqueue[0]
 	c.taskqueue = c.taskqueue[1:]
+	switch w.WorkType {
+	case MAP:
+		c.mapWork[w.MapWork.Filename] = STARTED
+	case REDUCE:
+		c.reduceWork[w.ReduceWork.ReduceIndex] = STARTED
+	}
 	c.mu.Unlock()
+
+	reply.HasWork = true
+	reply.Work = w
+
+	go c.Timer(w)
+
 	return nil
 }
 
@@ -50,25 +103,30 @@ func (c *Coordinator) ReplyFinish(args *WorkArgs, reply *WorkReply) error {
 	c.mu.Lock()
 	switch args.WorkType {
 	case MAP:
-		if args.IsSuccess {
-			c.mapWork[args.MapWork.Filename] = true
+		if args.IsSuccess && c.mapWork[args.MapWork.Filename] == STARTED {
+			c.mapWork[args.MapWork.Filename] = FINISHED
 		} else {
 			c.taskqueue = append(c.taskqueue, Work{
 				WorkType: MAP,
 				MapWork:  args.MapWork,
 			})
+			c.mapWork[args.MapWork.Filename] = NOTSTART
 		}
 	case REDUCE:
-		if args.IsSuccess {
-			c.reduceWork[args.ReduceWork.ReduceIndex] = true
+		if args.IsSuccess && c.mapWork[args.MapWork.Filename] == STARTED {
+			c.reduceWork[args.ReduceWork.ReduceIndex] = FINISHED
 		} else {
 			c.taskqueue = append(c.taskqueue, Work{
 				WorkType:   REDUCE,
 				ReduceWork: args.ReduceWork,
 			})
+			c.mapWork[args.MapWork.Filename] = NOTSTART
 		}
 	}
 	c.mu.Unlock()
+
+	go c.CheckMapWork()
+
 	return nil
 }
 
@@ -93,11 +151,11 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 	for _, v := range c.mapWork {
-		ret = ret && v
+		ret = ret && (v == FINISHED)
 	}
 
 	for _, v := range c.reduceWork {
-		ret = ret && v
+		ret = ret && (v == FINISHED)
 	}
 
 	return ret
@@ -109,12 +167,12 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		taskqueue:  make([]Work, 0),
-		reduceWork: make(map[int]bool),
-		mapWork:    make(map[string]bool),
+		reduceWork: make(map[int]WorkStatus),
+		mapWork:    make(map[string]WorkStatus),
 	}
 
 	for idx, file := range files {
-		c.mapWork[file] = false
+		c.mapWork[file] = NOTSTART
 		c.taskqueue = append(c.taskqueue, Work{
 			WorkType: MAP,
 			MapWork: MapWork{
@@ -126,7 +184,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	for i := 0; i < nReduce; i++ {
-		c.reduceWork[i] = false
+		c.reduceWork[i] = NOTSTART
 	}
 
 	c.server()

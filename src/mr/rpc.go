@@ -25,6 +25,13 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type WorkStatus int
+
+const (
+	NOTSTART WorkStatus = iota
+	STARTED
+	FINISHED
+)
 
 // the type of the work, MAP or REDUCE
 type WorkType int
@@ -43,6 +50,7 @@ type MapWork struct {
 
 type ReduceWork struct {
 	ReduceIndex int // to know witch mr-X-Y file it needs to work on
+	NMapWork    int // how many map files
 }
 
 type Work struct {
