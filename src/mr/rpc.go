@@ -24,16 +24,16 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+/*-Define Work-*/
+
 type WorkStatus int
 
 const (
-	NOTSTART WorkStatus = iota
-	STARTED
-	FINISHED
+	IDLE WorkStatus = iota
+	START
+	FINISH
 )
 
-// the type of the work, MAP or REDUCE
 type WorkType int
 
 const (
@@ -41,34 +41,33 @@ const (
 	REDUCE
 )
 
-// The information needed for Map type work
-type MapWork struct {
+type Work struct {
+	WorkID    int
+	WorkType  WorkType // MAP or REDUCE
 	Filename  string
 	FileIndex int // This is a convention for mr-X index
+	NMapWork  int // how many map files
 	NReduce   int // how many reduce files
 }
 
-type ReduceWork struct {
-	ReduceIndex int // to know witch mr-X-Y file it needs to work on
-	NMapWork    int // how many map files
-}
-
-type Work struct {
-	WorkType   WorkType
-	MapWork    MapWork
-	ReduceWork ReduceWork
-}
-
-type WorkReply struct {
+type WorkResponse struct {
 	HasWork bool
 	Work    Work
 }
 
-type WorkArgs struct {
-	WorkType   WorkType
-	MapWork    MapWork
-	ReduceWork ReduceWork
-	IsSuccess  bool
+type WorkRequest struct {
+	WorkerID int
+}
+
+/*-Define Report-*/
+// Report work finish only if success
+type ReportRequest struct {
+	Work Work
+}
+
+// Report work finish only if success
+type ReportResponse struct {
+	IsSuccess bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name

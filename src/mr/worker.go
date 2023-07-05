@@ -41,27 +41,28 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	// a while(true) loop in go
 	for {
-		work := CallGetWok()
+		workRes := CallGetWok()
 
-		if !work.HasWork {
+		if !workRes.HasWork {
 			//sleep for a 3 seconds
 			time.Sleep(3 * time.Second)
 			continue
 		}
 
-		if work.Work.WorkType == MAP {
-			DoMapWork(work.Work.MapWork, mapf)
+		if workRes.Work.WorkType == MAP {
+			DoMapWork(workRes.Work, mapf)
 		} else {
-			DoReduceWork(work.Work.ReduceWork, reducef)
+			DoReduceWork(workRes.Work, reducef)
 		}
 	}
 }
 
-func DoReduceWork(work ReduceWork, reducef func(string, []string) string) {
-	fileIndex := work.ReduceIndex
+func DoReduceWork(work Work, reducef func(string, []string) string) {
+	fileIndex := work.FileIndex
 	nMapWork := work.NMapWork
 
 	intermediate := []KeyValue{}
+
 	for i := 0; i < nMapWork; i++ {
 		filename := fmt.Sprintf("mr-%d-%d", i, fileIndex)
 		file, err := os.Open(filename)
@@ -85,7 +86,7 @@ func DoReduceWork(work ReduceWork, reducef func(string, []string) string) {
 	sort.Sort(ByKey(intermediate))
 
 	oname := fmt.Sprintf("mr-out-%d", fileIndex)
-	ofile, _ := ioutil.TempFile("./mr-tmp/", oname)
+	ofile, _ := ioutil.TempFile(".", oname)
 
 	//
 	// call Reduce on each distinct key in intermediate[],
@@ -109,15 +110,12 @@ func DoReduceWork(work ReduceWork, reducef func(string, []string) string) {
 		i = j
 	}
 
-	os.Rename(ofile.Name(), "./mr-tmp/"+oname)
+	os.Rename(ofile.Name(), oname)
 
-	CallReplyFinish(Work{
-		WorkType:   REDUCE,
-		ReduceWork: work,
-	})
+	CallReport(work)
 }
 
-func DoMapWork(work MapWork, mapf func(string, string) []KeyValue) {
+func DoMapWork(work Work, mapf func(string, string) []KeyValue) {
 	filename := work.Filename
 	fmt.Println("DoMapWork: ", filename)
 	file, err := os.Open(filename)
@@ -162,27 +160,16 @@ func DoMapWork(work MapWork, mapf func(string, string) []KeyValue) {
 		os.Rename(imtFile.Name(), imtFilename)
 	}
 
-	CallReplyFinish(Work{
-		WorkType: MAP,
-		MapWork:  work,
-	})
+	CallReport(work)
 }
 
-func CallReplyFinish(w Work) WorkReply {
-	args := WorkArgs{}
-	reply := WorkReply{}
-
-	args.WorkType = w.WorkType
-
-	if w.WorkType == MAP {
-		args.MapWork = w.MapWork
-	} else {
-		args.ReduceWork = w.ReduceWork
+func CallReport(w Work) ReportResponse {
+	args := ReportRequest{
+		Work: w,
 	}
+	reply := ReportResponse{}
 
-	args.IsSuccess = true
-
-	ok := call("Coordinator.ReplyFinish", &args, &reply)
+	ok := call("Coordinator.CallReport", &args, &reply)
 
 	if !ok {
 		fmt.Printf("call failed!\n")
@@ -191,10 +178,10 @@ func CallReplyFinish(w Work) WorkReply {
 	return reply
 }
 
-func CallGetWok() WorkReply {
-	args := WorkArgs{}
-	reply := WorkReply{}
-	ok := call("Coordinator.GetWork", &args, &reply)
+func CallGetWok() WorkResponse {
+	args := WorkRequest{}
+	reply := WorkResponse{}
+	ok := call("Coordinator.CallGetWork", &args, &reply)
 
 	if !ok {
 		fmt.Printf("call failed!\n")

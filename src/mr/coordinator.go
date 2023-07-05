@@ -11,121 +11,142 @@ import (
 	"time"
 )
 
-type WorkDetail struct {
-	IsSuccess bool
-	StartTime time.Time
-}
-
 type Coordinator struct {
 	// Your definitions here.
-	mu         sync.Mutex            // an internal lock
-	taskqueue  []Work                // a taskqueue
-	reduceWork map[int]WorkStatus    // a record if reduceWork all success
-	mapWork    map[string]WorkStatus // a record if  mapwork all success
+	mu          sync.Mutex  // an internal lock
+	taskqueue   TaskQueue   // a taskqueue
+	worktracker WorkTracker // a record if reduceWork all success
+	done        bool
+	nMap        int
+	nReduce     int
+}
+
+type WorkTracker struct {
+	statusmap map[Work]WorkStatus
+	mu        sync.Mutex
+}
+
+func (w *WorkTracker) Set(work Work, status WorkStatus) {
+	w.mu.Lock()
+	w.statusmap[work] = status
+	w.mu.Unlock()
+}
+
+func (w *WorkTracker) Get(work Work) WorkStatus {
+	w.mu.Lock()
+	status := w.statusmap[work]
+	w.mu.Unlock()
+	return status
+}
+
+func (w *WorkTracker) Done() bool {
+	w.mu.Lock()
+	ret := true
+	for _, v := range w.statusmap {
+		ret = ret && (v == FINISH)
+	}
+	w.mu.Unlock()
+	return ret
+}
+
+/*task queue with thread lock*/
+type TaskQueue struct {
+	taskqueue []Work
+	mu        sync.Mutex
+}
+
+func (t *TaskQueue) Push(w Work) {
+	t.mu.Lock()
+	t.taskqueue = append(t.taskqueue, w)
+	t.mu.Unlock()
+}
+
+func (t *TaskQueue) Pop() Work {
+	t.mu.Lock()
+	w := t.taskqueue[0]
+	t.taskqueue = t.taskqueue[1:]
+	t.mu.Unlock()
+	return w
+}
+
+func (t *TaskQueue) Empty() bool {
+	var ret bool
+	t.mu.Lock()
+	ret = len(t.taskqueue) == 0
+	t.mu.Unlock()
+	return ret
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
-func (c *Coordinator) Timer(w Work) {
-	time.Sleep(10 * time.Second)
-	c.mu.Lock()
-	switch w.WorkType {
-	case MAP:
-		if c.mapWork[w.MapWork.Filename] != FINISHED {
-			c.taskqueue = append(c.taskqueue, w)
-			c.mapWork[w.MapWork.Filename] = NOTSTART
-		}
-	case REDUCE:
-		if c.reduceWork[w.ReduceWork.ReduceIndex] != FINISHED {
-			c.taskqueue = append(c.taskqueue, w)
-			c.reduceWork[w.ReduceWork.ReduceIndex] = NOTSTART
+func (c *Coordinator) Timer(w Work, now time.Time) {
+	for {
+		if time.Since(now) > 10*time.Second {
+			if c.worktracker.Get(w) == START {
+				c.taskqueue.Push(w)
+				c.worktracker.Set(w, IDLE)
+			}
+			return
 		}
 	}
-	c.mu.Unlock()
 }
 
 func (c *Coordinator) CheckMapWork() {
-	ret := true
-	for _, v := range c.mapWork {
-		ret = ret && (v == FINISHED)
-	}
+	ret := c.worktracker.Done()
+
 	if !ret {
 		return
 	}
-	c.mu.Lock()
+
 	fmt.Println("All map work finished")
 	fmt.Println("Start reduce work")
-	for i := 0; i < len(c.reduceWork); i++ {
-		c.taskqueue = append(c.taskqueue, Work{
-			WorkType: REDUCE,
-			ReduceWork: ReduceWork{
-				ReduceIndex: i,
-				NMapWork:    len(c.mapWork),
-			},
+
+	for i := 0; i < c.nReduce; i++ {
+		c.taskqueue.Push(Work{
+			WorkID:    len(c.worktracker.statusmap),
+			WorkType:  REDUCE,
+			FileIndex: i,
+			NReduce:   c.nReduce,
+			NMapWork:  c.nMap,
 		})
 	}
-	c.mu.Unlock()
 }
 
-func (c *Coordinator) GetWork(args *WorkArgs, reply *WorkReply) error {
-	if len(c.taskqueue) == 0 {
+func (c *Coordinator) CallGetWork(args *WorkRequest, reply *WorkResponse) error {
+	if c.taskqueue.Empty() {
 		reply.HasWork = false
 		return nil
 	}
-	c.mu.Lock()
-	w := c.taskqueue[0]
-	c.taskqueue = c.taskqueue[1:]
-	switch w.WorkType {
-	case MAP:
-		c.mapWork[w.MapWork.Filename] = STARTED
-	case REDUCE:
-		c.reduceWork[w.ReduceWork.ReduceIndex] = STARTED
-	}
-	c.mu.Unlock()
+
+	work := c.taskqueue.Pop()
+	c.worktracker.Set(work, START)
 
 	reply.HasWork = true
-	reply.Work = w
+	reply.Work = work
+	now := time.Now()
 
-	go c.Timer(w)
+	go c.Timer(work, now)
 
 	return nil
 }
 
-func (c *Coordinator) ReplyFinish(args *WorkArgs, reply *WorkReply) error {
-	c.mu.Lock()
-	switch args.WorkType {
-	case MAP:
-		if args.IsSuccess && c.mapWork[args.MapWork.Filename] == STARTED {
-			c.mapWork[args.MapWork.Filename] = FINISHED
+func (c *Coordinator) CallReport(args *ReportRequest, reply *ReportResponse) error {
+	work := args.Work
+
+	if c.worktracker.Get(work) == START {
+		c.worktracker.Set(work, FINISH)
+		if work.WorkType == MAP {
+			c.mu.Lock()
+			c.CheckMapWork()
+			c.mu.Unlock()
 		} else {
-			c.taskqueue = append(c.taskqueue, Work{
-				WorkType: MAP,
-				MapWork:  args.MapWork,
-			})
-			c.mapWork[args.MapWork.Filename] = NOTSTART
-		}
-	case REDUCE:
-		if args.IsSuccess && c.mapWork[args.MapWork.Filename] == STARTED {
-			c.reduceWork[args.ReduceWork.ReduceIndex] = FINISHED
-		} else {
-			c.taskqueue = append(c.taskqueue, Work{
-				WorkType:   REDUCE,
-				ReduceWork: args.ReduceWork,
-			})
-			c.mapWork[args.MapWork.Filename] = NOTSTART
+			c.mu.Lock()
+			c.done = c.worktracker.Done()
+			c.mu.Unlock()
 		}
 	}
-	c.mu.Unlock()
 
-	go c.CheckMapWork()
+	reply.IsSuccess = true
 
 	return nil
 }
@@ -147,18 +168,7 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := true
-
-	// Your code here.
-	for _, v := range c.mapWork {
-		ret = ret && (v == FINISHED)
-	}
-
-	for _, v := range c.reduceWork {
-		ret = ret && (v == FINISHED)
-	}
-
-	return ret
+	return c.done
 }
 
 // create a Coordinator.
@@ -166,25 +176,28 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		taskqueue:  make([]Work, 0),
-		reduceWork: make(map[int]WorkStatus),
-		mapWork:    make(map[string]WorkStatus),
+		nMap:    len(files),
+		nReduce: nReduce,
+		done:    false,
+		taskqueue: TaskQueue{
+			taskqueue: []Work{},
+		},
+		worktracker: WorkTracker{
+			statusmap: make(map[Work]WorkStatus),
+		},
 	}
 
 	for idx, file := range files {
-		c.mapWork[file] = NOTSTART
-		c.taskqueue = append(c.taskqueue, Work{
-			WorkType: MAP,
-			MapWork: MapWork{
-				Filename:  file,
-				FileIndex: idx,
-				NReduce:   nReduce,
-			},
-		})
-	}
-
-	for i := 0; i < nReduce; i++ {
-		c.reduceWork[i] = NOTSTART
+		work := Work{
+			WorkID:    len(c.worktracker.statusmap),
+			WorkType:  MAP,
+			Filename:  file,
+			FileIndex: idx,
+			NReduce:   c.nReduce,
+			NMapWork:  c.nMap,
+		}
+		c.taskqueue.Push(work)
+		c.worktracker.Set(work, IDLE)
 	}
 
 	c.server()
