@@ -39,7 +39,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	// a while(true) loop in go
 	for {
 		workRes := CallGetWok()
 
@@ -60,7 +59,6 @@ func Worker(mapf func(string, string) []KeyValue,
 func DoReduceWork(work Work, reducef func(string, []string) string) {
 	fileIndex := work.FileIndex
 	nMapWork := work.NMapWork
-
 	intermediate := []KeyValue{}
 
 	for i := 0; i < nMapWork; i++ {
@@ -117,7 +115,7 @@ func DoReduceWork(work Work, reducef func(string, []string) string) {
 
 func DoMapWork(work Work, mapf func(string, string) []KeyValue) {
 	filename := work.Filename
-	fmt.Println("DoMapWork: ", filename)
+
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
