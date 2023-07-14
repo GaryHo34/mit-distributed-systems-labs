@@ -59,7 +59,6 @@ func Worker(mapf func(string, string) []KeyValue,
 func DoReduceWork(work Work, reducef func(string, []string) string) {
 	fileIndex := work.FileIndex
 	nMapWork := work.NMapWork
-	fmt.Printf("DoReduceWork: %d\n", fileIndex)
 	intermediate := []KeyValue{}
 
 	for i := 0; i < nMapWork; i++ {

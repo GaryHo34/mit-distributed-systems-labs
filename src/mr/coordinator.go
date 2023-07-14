@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -13,7 +12,6 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	mu          sync.Mutex  // an internal lock
 	taskqueue   TaskQueue   // a taskqueue
 	worktracker WorkTracker // a record if reduceWork all success
 	done        bool
@@ -40,8 +38,8 @@ func (w *WorkTracker) Get(work Work) WorkStatus {
 }
 
 func (w *WorkTracker) Done() bool {
-	w.mu.Lock()
 	ret := true
+	w.mu.Lock()
 	for _, v := range w.statusmap {
 		ret = ret && (v == FINISH)
 	}
@@ -53,16 +51,21 @@ func (w *WorkTracker) Done() bool {
 type TaskQueue struct {
 	taskqueue []Work
 	mu        sync.Mutex
+	cond      *sync.Cond
 }
 
 func (t *TaskQueue) Push(w Work) {
 	t.mu.Lock()
 	t.taskqueue = append(t.taskqueue, w)
+	t.cond.Signal()
 	t.mu.Unlock()
 }
 
 func (t *TaskQueue) Pop() Work {
 	t.mu.Lock()
+	for t.Empty() {
+		t.cond.Wait()
+	}
 	w := t.taskqueue[0]
 	t.taskqueue = t.taskqueue[1:]
 	t.mu.Unlock()
@@ -70,46 +73,7 @@ func (t *TaskQueue) Pop() Work {
 }
 
 func (t *TaskQueue) Empty() bool {
-	var ret bool
-	t.mu.Lock()
-	ret = len(t.taskqueue) == 0
-	t.mu.Unlock()
-	return ret
-}
-
-// Your code here -- RPC handlers for the worker to call.
-
-func (c *Coordinator) Timer(w Work, now time.Time) {
-	for {
-		if time.Since(now) > 10*time.Second {
-			if c.worktracker.Get(w) == START {
-				c.taskqueue.Push(w)
-				c.worktracker.Set(w, IDLE)
-			}
-			return
-		}
-	}
-}
-
-func (c *Coordinator) CheckMapWork() {
-	ret := c.worktracker.Done()
-
-	if !ret {
-		return
-	}
-
-	fmt.Println("All map work finished")
-	fmt.Println("Start reduce work")
-
-	for i := 0; i < c.nReduce; i++ {
-		c.taskqueue.Push(Work{
-			WorkID:    len(c.worktracker.statusmap),
-			WorkType:  REDUCE,
-			FileIndex: i,
-			NReduce:   c.nReduce,
-			NMapWork:  c.nMap,
-		})
-	}
+	return len(t.taskqueue) == 0
 }
 
 func (c *Coordinator) CallGetWork(args *WorkRequest, reply *WorkResponse) error {
@@ -130,23 +94,47 @@ func (c *Coordinator) CallGetWork(args *WorkRequest, reply *WorkResponse) error 
 	return nil
 }
 
+func (c *Coordinator) Timer(w Work, now time.Time) {
+	for {
+		if time.Since(now) > 10*time.Second {
+			if c.worktracker.Get(w) == START {
+				c.taskqueue.Push(w)
+				c.worktracker.Set(w, IDLE)
+			}
+			return
+		}
+	}
+}
+
 func (c *Coordinator) CallReport(args *ReportRequest, reply *ReportResponse) error {
 	work := args.Work
+	reply.IsSuccess = true
 
 	if c.worktracker.Get(work) == START {
 		c.worktracker.Set(work, FINISH)
+
+		done := c.worktracker.Done()
+
+		if !done {
+			return nil
+		}
+
 		if work.WorkType == MAP {
-			c.mu.Lock()
-			c.CheckMapWork()
-			c.mu.Unlock()
+			for i := 0; i < c.nReduce; i++ {
+				work := Work{
+					WorkID:    len(c.worktracker.statusmap),
+					WorkType:  REDUCE,
+					FileIndex: i,
+					NReduce:   c.nReduce,
+					NMapWork:  c.nMap,
+				}
+				c.taskqueue.Push(work)
+				c.worktracker.Set(work, IDLE)
+			}
 		} else {
-			c.mu.Lock()
-			c.done = c.worktracker.Done()
-			c.mu.Unlock()
+			c.done = done
 		}
 	}
-
-	reply.IsSuccess = true
 
 	return nil
 }
@@ -175,17 +163,21 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
+
 	c := Coordinator{
 		nMap:    len(files),
 		nReduce: nReduce,
 		done:    false,
 		taskqueue: TaskQueue{
 			taskqueue: []Work{},
+			mu:        sync.Mutex{},
 		},
 		worktracker: WorkTracker{
 			statusmap: make(map[Work]WorkStatus),
 		},
 	}
+
+	c.taskqueue.cond = sync.NewCond(&c.taskqueue.mu)
 
 	for idx, file := range files {
 		work := Work{
