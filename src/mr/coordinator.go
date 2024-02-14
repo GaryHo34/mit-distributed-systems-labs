@@ -6,136 +6,69 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	taskqueue   TaskQueue   // a taskqueue
-	worktracker WorkTracker // a record if reduceWork all success
-	done        bool
-	nMap        int
-	nReduce     int
+	tasks     chan Work // a taskqueue
+	timerMap  map[int]*time.Timer
+	mapCount  int32
+	reduCount int32
+	nMap      int
+	nReduce   int
 }
 
-type WorkTracker struct {
-	statusmap map[Work]WorkStatus
-	mu        sync.Mutex
-}
-
-func (w *WorkTracker) Set(work Work, status WorkStatus) {
-	w.mu.Lock()
-	w.statusmap[work] = status
-	w.mu.Unlock()
-}
-
-func (w *WorkTracker) Get(work Work) WorkStatus {
-	w.mu.Lock()
-	status := w.statusmap[work]
-	w.mu.Unlock()
-	return status
-}
-
-func (w *WorkTracker) Done() bool {
-	ret := true
-	w.mu.Lock()
-	for _, v := range w.statusmap {
-		ret = ret && (v == FINISH)
-	}
-	w.mu.Unlock()
-	return ret
-}
-
-/*task queue with thread lock*/
-type TaskQueue struct {
-	taskqueue []Work
-	mu        sync.Mutex
-	cond      *sync.Cond
-}
-
-func (t *TaskQueue) Push(w Work) {
-	t.mu.Lock()
-	t.taskqueue = append(t.taskqueue, w)
-	t.cond.Signal()
-	t.mu.Unlock()
-}
-
-func (t *TaskQueue) Pop() Work {
-	t.mu.Lock()
-	for t.Empty() {
-		t.cond.Wait()
-	}
-	w := t.taskqueue[0]
-	t.taskqueue = t.taskqueue[1:]
-	t.mu.Unlock()
-	return w
-}
-
-func (t *TaskQueue) Empty() bool {
-	return len(t.taskqueue) == 0
-}
-
-func (c *Coordinator) CallGetWork(args *WorkRequest, reply *WorkResponse) error {
-	if c.taskqueue.Empty() {
+func (c *Coordinator) CallGetWork(args *WorkArgs, reply *WorkReply) error {
+	if len(c.tasks) == 0 {
 		reply.HasWork = false
 		return nil
 	}
-
-	work := c.taskqueue.Pop()
-	c.worktracker.Set(work, START)
-
+	tid := len(c.timerMap)
+	c.timerMap[tid] = time.NewTimer(10 * time.Second)
+	reply.Tid = tid
+	reply.Work = <-c.tasks
 	reply.HasWork = true
-	reply.Work = work
-	now := time.Now()
 
-	go c.Timer(work, now)
+	go func() {
+		<-c.timerMap[tid].C
+		c.tasks <- reply.Work
+	}()
 
 	return nil
 }
 
-func (c *Coordinator) Timer(w Work, now time.Time) {
-	for {
-		if time.Since(now) > 10*time.Second {
-			if c.worktracker.Get(w) == START {
-				c.taskqueue.Push(w)
-				c.worktracker.Set(w, IDLE)
-			}
-			return
-		}
+func (c *Coordinator) CallReport(args *ReportArgs, reply *ReportReply) error {
+	if !c.timerMap[args.Tid].Stop() {
+		reply.Success = false
+		return nil
 	}
-}
 
-func (c *Coordinator) CallReport(args *ReportRequest, reply *ReportResponse) error {
-	work := args.Work
-	reply.IsSuccess = true
-
-	if c.worktracker.Get(work) == START {
-		c.worktracker.Set(work, FINISH)
-
-		done := c.worktracker.Done()
-
-		if !done {
+	switch args.Work.WorkType {
+	case MAP:
+		if atomic.LoadInt32(&c.mapCount) == 0 {
+			reply.Success = false
 			return nil
 		}
-
-		if work.WorkType == MAP {
+		if atomic.AddInt32(&c.mapCount, -1) == 0 {
 			for i := 0; i < c.nReduce; i++ {
-				work := Work{
-					WorkID:    len(c.worktracker.statusmap),
+				c.tasks <- Work{
 					WorkType:  REDUCE,
 					FileIndex: i,
 					NReduce:   c.nReduce,
 					NMapWork:  c.nMap,
 				}
-				c.taskqueue.Push(work)
-				c.worktracker.Set(work, IDLE)
+				atomic.AddInt32(&c.reduCount, 1)
 			}
-		} else {
-			c.done = done
+		}
+	case REDUCE:
+		if atomic.LoadInt32(&c.reduCount) == 0 {
+			reply.Success = false
+			return nil
 		}
 	}
-
+	reply.Success = true
 	return nil
 }
 
@@ -156,7 +89,7 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	return c.done
+	return atomic.LoadInt32(&c.mapCount) == 0 && atomic.LoadInt32(&c.reduCount) == 0
 }
 
 // create a Coordinator.
@@ -164,32 +97,31 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
-	c := Coordinator{
-		nMap:    len(files),
-		nReduce: nReduce,
-		done:    false,
-		taskqueue: TaskQueue{
-			taskqueue: []Work{},
-			mu:        sync.Mutex{},
-		},
-		worktracker: WorkTracker{
-			statusmap: make(map[Work]WorkStatus),
-		},
+	var buflen int
+	if len(files) > nReduce {
+		buflen = len(files)
+	} else {
+		buflen = nReduce
 	}
 
-	c.taskqueue.cond = sync.NewCond(&c.taskqueue.mu)
+	c := Coordinator{
+		nMap:      len(files),
+		nReduce:   nReduce,
+		mapCount:  0,
+		reduCount: 0,
+		tasks:     make(chan Work, buflen),
+		timerMap:  make(map[int]*time.Timer),
+	}
 
 	for idx, file := range files {
-		work := Work{
-			WorkID:    len(c.worktracker.statusmap),
+		c.tasks <- Work{
 			WorkType:  MAP,
 			Filename:  file,
 			FileIndex: idx,
 			NReduce:   c.nReduce,
 			NMapWork:  c.nMap,
 		}
-		c.taskqueue.Push(work)
-		c.worktracker.Set(work, IDLE)
+		atomic.AddInt32(&c.mapCount, 1)
 	}
 
 	c.server()

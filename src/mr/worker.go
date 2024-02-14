@@ -40,28 +40,26 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	for {
-		workRes := CallGetWok()
-
-		if !workRes.HasWork {
-			//sleep for a 3 seconds
+		r := CallGetWok()
+		if !r.HasWork {
 			time.Sleep(3 * time.Second)
 			continue
 		}
 
-		if workRes.Work.WorkType == MAP {
-			DoMapWork(workRes.Work, mapf)
-		} else {
-			DoReduceWork(workRes.Work, reducef)
+		switch r.Work.WorkType {
+		case MAP:
+			DoMapWork(r.Work, mapf, r.Tid)
+		case REDUCE:
+			DoReduceWork(r.Work, reducef, r.Tid)
 		}
 	}
 }
 
-func DoReduceWork(work Work, reducef func(string, []string) string) {
+func DoReduceWork(work Work, reducef func(string, []string) string, tid int) {
 	fileIndex := work.FileIndex
-	nMapWork := work.NMapWork
 	intermediate := []KeyValue{}
 
-	for i := 0; i < nMapWork; i++ {
+	for i := 0; i < work.NMapWork; i++ {
 		filename := fmt.Sprintf("mr-%d-%d", i, fileIndex)
 		file, err := os.Open(filename)
 
@@ -110,10 +108,10 @@ func DoReduceWork(work Work, reducef func(string, []string) string) {
 
 	os.Rename(ofile.Name(), oname)
 
-	CallReport(work)
+	CallReport(work, tid)
 }
 
-func DoMapWork(work Work, mapf func(string, string) []KeyValue) {
+func DoMapWork(work Work, mapf func(string, string) []KeyValue, tid int) {
 	filename := work.Filename
 
 	file, err := os.Open(filename)
@@ -158,27 +156,25 @@ func DoMapWork(work Work, mapf func(string, string) []KeyValue) {
 		os.Rename(imtFile.Name(), imtFilename)
 	}
 
-	CallReport(work)
+	CallReport(work, tid)
 }
 
-func CallReport(w Work) ReportResponse {
-	args := ReportRequest{
+func CallReport(w Work, tid int) {
+	args := ReportArgs{
 		Work: w,
+		Tid:  tid,
 	}
-	reply := ReportResponse{}
-
+	reply := ReportReply{}
 	ok := call("Coordinator.CallReport", &args, &reply)
 
 	if !ok {
 		fmt.Printf("call failed!\n")
 	}
-
-	return reply
 }
 
-func CallGetWok() WorkResponse {
-	args := WorkRequest{}
-	reply := WorkResponse{}
+func CallGetWok() WorkReply {
+	args := WorkArgs{}
+	reply := WorkReply{}
 	ok := call("Coordinator.CallGetWork", &args, &reply)
 
 	if !ok {

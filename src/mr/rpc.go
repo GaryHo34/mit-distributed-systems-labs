@@ -42,7 +42,6 @@ const (
 )
 
 type Work struct {
-	WorkID    int
 	WorkType  WorkType // MAP or REDUCE
 	Filename  string
 	FileIndex int // This is a convention for mr-X index
@@ -50,24 +49,25 @@ type Work struct {
 	NReduce   int // how many reduce files
 }
 
-type WorkResponse struct {
-	HasWork bool
-	Work    Work
+type WorkArgs struct {
+	WorkerID int
 }
 
-type WorkRequest struct {
-	WorkerID int
+type WorkReply struct {
+	HasWork bool
+	Work    Work
+	Tid     int
 }
 
 /*-Define Report-*/
 // Report work finish only if success
-type ReportRequest struct {
+type ReportArgs struct {
 	Work Work
+	Tid  int
 }
 
-// Report work finish only if success
-type ReportResponse struct {
-	IsSuccess bool
+type ReportReply struct {
+	Success bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
