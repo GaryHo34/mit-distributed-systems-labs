@@ -6,18 +6,18 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	tasks     chan Work // a taskqueue
-	timerMap  map[int]*time.Timer
-	mapCount  int32
-	reduCount int32
-	nMap      int
-	nReduce   int
+	tasks    chan Work // a taskqueue
+	timerMap map[int]*time.Timer
+	wg       sync.WaitGroup
+	nMap     int
+	nReduce  int
+	done     bool
 }
 
 func (c *Coordinator) CallGetWork(args *WorkArgs, reply *WorkReply) error {
@@ -44,30 +44,7 @@ func (c *Coordinator) CallReport(args *ReportArgs, reply *ReportReply) error {
 		reply.Success = false
 		return nil
 	}
-
-	switch args.Work.WorkType {
-	case MAP:
-		if atomic.LoadInt32(&c.mapCount) == 0 {
-			reply.Success = false
-			return nil
-		}
-		if atomic.AddInt32(&c.mapCount, -1) == 0 {
-			for i := 0; i < c.nReduce; i++ {
-				c.tasks <- Work{
-					WorkType:  REDUCE,
-					FileIndex: i,
-					NReduce:   c.nReduce,
-					NMapWork:  c.nMap,
-				}
-				atomic.AddInt32(&c.reduCount, 1)
-			}
-		}
-	case REDUCE:
-		if atomic.LoadInt32(&c.reduCount) == 0 {
-			reply.Success = false
-			return nil
-		}
-	}
+	c.wg.Done()
 	reply.Success = true
 	return nil
 }
@@ -89,7 +66,26 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	return atomic.LoadInt32(&c.mapCount) == 0 && atomic.LoadInt32(&c.reduCount) == 0
+	return c.done
+}
+
+func StartReduceWork(c *Coordinator) {
+	c.wg.Wait()
+	for i := 0; i < c.nReduce; i++ {
+		c.tasks <- Work{
+			WorkType:  REDUCE,
+			FileIndex: i,
+			NReduce:   c.nReduce,
+			NMapWork:  c.nMap,
+		}
+		c.wg.Add(1)
+	}
+	go WorkDone(c)
+}
+
+func WorkDone(c *Coordinator) {
+	c.wg.Wait()
+	c.done = true
 }
 
 // create a Coordinator.
@@ -105,12 +101,12 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	c := Coordinator{
-		nMap:      len(files),
-		nReduce:   nReduce,
-		mapCount:  0,
-		reduCount: 0,
-		tasks:     make(chan Work, buflen),
-		timerMap:  make(map[int]*time.Timer),
+		nMap:     len(files),
+		nReduce:  nReduce,
+		wg:       sync.WaitGroup{},
+		tasks:    make(chan Work, buflen),
+		timerMap: make(map[int]*time.Timer),
+		done:     false,
 	}
 
 	for idx, file := range files {
@@ -121,9 +117,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			NReduce:   c.nReduce,
 			NMapWork:  c.nMap,
 		}
-		atomic.AddInt32(&c.mapCount, 1)
+		c.wg.Add(1)
 	}
-
+	go StartReduceWork(&c)
 	c.server()
 
 	return &c
