@@ -28,13 +28,14 @@ import (
 	"6.5840/labrpc"
 )
 
+
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
 // committed log entry.
 //
-// in part 2D you'll want to send other kinds of messages (e.g.,
+// in part 3D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 type ApplyMsg struct {
@@ -42,26 +43,12 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 
-	// For 2D:
+	// For 3D:
 	SnapshotValid bool
 	Snapshot      []byte
 	SnapshotTerm  int
 	SnapshotIndex int
 }
-
-
-type Log struct {
-	Term    int
-	Command interface{}
-}
-
-type ServerState int
-
-const (
-	FOLLOWER ServerState = iota
-	CANDIDATE
-	LEADER
-)
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -71,34 +58,20 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (2A, 2B, 2C).
+	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	// server state
-	state ServerState
-
-	// presistent state on all servers
-	currentTerm int   // latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    int   // candidateId that received vote in current term (or null if none)
-	logs        []Log // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
-
-	// volatile state on all servers
-	commitIndex int // index of highest log entry known to be committed (initialized to 0, increases monotonically)
-	lastApplied int // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
-
-	// volatile state on leaders (reinitialized after election)
-	nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	// Your code here (2A).
-	term, isLeader := rf.currentTerm, rf.state == LEADER
-	return term, isLeader
+	var term int
+	var isleader bool
+	// Your code here (3A).
+	return term, isleader
 }
 
 // save Raft's persistent state to stable storage,
@@ -109,7 +82,7 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (2C).
+	// Your code here (3C).
 	// Example:
 	// w := new(bytes.Buffer)
 	// e := labgob.NewEncoder(w)
@@ -119,12 +92,13 @@ func (rf *Raft) persist() {
 	// rf.persister.Save(raftstate, nil)
 }
 
+
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
+	// Your code here (3C).
 	// Example:
 	// r := bytes.NewBuffer(data)
 	// d := labgob.NewDecoder(r)
@@ -139,52 +113,32 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
+
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
+	// Your code here (3D).
 
 }
 
-type AppendEntriesArgs struct {
-	Term int // leader's term
-	LeaderId int // so follower can redirect clients
-	PrevLogIndex int // index of log entry immediately preceding new ones
-
-	PrevLogTerm int // term of prevLogIndex entry
-	Entries []Log // log entries to store (empty for heartbeat; may send more than one for efficiency)
-
-	LeaderCommit int // leader's commitIndex
-}
-
-type AppendEntriesReply struct {
-	Term int // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
-}
 
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term int // candidate's term
-	CandidateId int // candidate requesting vote
-	LastLogIndex int // index of candidate's last log entry
-	LastLogTerm int // term of candidate's last log entry
+	// Your data here (3A, 3B).
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
-	Term int // currentTerm, for candidate to update itself
-	VoteGranted bool // true means candidate received vote
+	// Your data here (3A).
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	// Your code here (3A, 3B).
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -219,6 +173,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -236,7 +191,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
-	// Your code here (2B).
+	// Your code here (3B).
+
 
 	return index, term, isLeader
 }
@@ -263,7 +219,7 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
-		// Your code here (2A)
+		// Your code here (3A)
 		// Check if a leader election should be started.
 
 
@@ -290,24 +246,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
-	rf.state = FOLLOWER
-	rf.currentTerm = 0
-	rf.votedFor = -1         // -1 means null
-	rf.logs = make([]Log, 0) // empty log entry
-
-	rf.commitIndex = 0
-	rf.lastApplied = 0
-
-	// leader state will be reinitialized after election
-	rf.nextIndex = make([]int, len(peers))
-	rf.matchIndex = make([]int, len(peers))
+	// Your initialization code here (3A, 3B, 3C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
 
 	return rf
 }

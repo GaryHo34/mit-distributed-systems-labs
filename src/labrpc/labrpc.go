@@ -329,6 +329,18 @@ func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	return e
 }
 
+func (rn *Network) DeleteEnd(endname interface{}) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	if _, ok := rn.ends[endname]; !ok {
+		log.Fatalf("MakeEnd: %v doesn't exists\n", endname)
+	}
+	delete(rn.ends, endname)
+	delete(rn.enabled, endname)
+	delete(rn.connections, endname)
+}
+
 func (rn *Network) AddServer(servername interface{}, rs *Server) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
