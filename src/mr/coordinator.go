@@ -10,10 +10,13 @@ import (
 	"time"
 )
 
+const TimerPoolSize = 10000
+
 type Coordinator struct {
 	// Your definitions here.
 	tasks    chan Work // a taskqueue
-	timerMap map[int]*time.Timer
+	timerMap []*time.Timer
+	eId      int
 	wg       sync.WaitGroup
 	nMap     int
 	nReduce  int
@@ -25,14 +28,15 @@ func (c *Coordinator) CallGetWork(args *WorkArgs, reply *WorkReply) error {
 		reply.HasWork = false
 		return nil
 	}
-	tid := len(c.timerMap)
-	c.timerMap[tid] = time.NewTimer(10 * time.Second)
-	reply.Tid = tid
+	id := c.eId
+	c.eId++
+	c.timerMap[id%TimerPoolSize] = time.NewTimer(10 * time.Second)
+	reply.Tid = id
 	reply.Work = <-c.tasks
 	reply.HasWork = true
 
 	go func() {
-		<-c.timerMap[tid].C
+		<-c.timerMap[id%TimerPoolSize].C
 		c.tasks <- reply.Work
 	}()
 
@@ -40,7 +44,7 @@ func (c *Coordinator) CallGetWork(args *WorkArgs, reply *WorkReply) error {
 }
 
 func (c *Coordinator) CallReport(args *ReportArgs, reply *ReportReply) error {
-	if !c.timerMap[args.Tid].Stop() {
+	if !c.timerMap[args.Tid%TimerPoolSize].Stop() {
 		reply.Success = false
 		return nil
 	}
@@ -105,7 +109,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		nReduce:  nReduce,
 		wg:       sync.WaitGroup{},
 		tasks:    make(chan Work, buflen),
-		timerMap: make(map[int]*time.Timer),
+		timerMap: make([]*time.Timer, TimerPoolSize),
 		done:     false,
 	}
 
