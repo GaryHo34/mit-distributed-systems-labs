@@ -56,14 +56,14 @@ type WorkArgs struct {
 type WorkReply struct {
 	HasWork bool
 	Work    Work
-	Tid     int
+	Term    int
 }
 
 /*-Define Report-*/
 // Report work finish only if success
 type ReportArgs struct {
 	Work Work
-	Tid  int
+	Term int
 }
 
 type ReportReply struct {

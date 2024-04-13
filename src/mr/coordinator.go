@@ -2,6 +2,7 @@ package mr
 
 import (
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -10,17 +11,17 @@ import (
 	"time"
 )
 
-const TimerPoolSize = 10000
+const SUCCESS = math.MaxInt32
 
 type Coordinator struct {
 	// Your definitions here.
-	tasks    chan Work // a taskqueue
-	timerMap []*time.Timer
-	eId      int
-	wg       sync.WaitGroup
-	nMap     int
-	nReduce  int
-	done     bool
+	tasks   chan Work // a taskqueue
+	mu      sync.Mutex
+	terms   []int
+	wg      sync.WaitGroup
+	nMap    int
+	nReduce int
+	done    bool
 }
 
 func (c *Coordinator) CallGetWork(args *WorkArgs, reply *WorkReply) error {
@@ -28,15 +29,20 @@ func (c *Coordinator) CallGetWork(args *WorkArgs, reply *WorkReply) error {
 		reply.HasWork = false
 		return nil
 	}
-	id := c.eId
-	c.eId++
-	c.timerMap[id%TimerPoolSize] = time.NewTimer(10 * time.Second)
-	reply.Tid = id
 	reply.Work = <-c.tasks
+	c.mu.Lock()
+	reply.Term = c.terms[reply.Work.FileIndex]
+	c.mu.Unlock()
 	reply.HasWork = true
 
 	go func() {
-		<-c.timerMap[id%TimerPoolSize].C
+		time.Sleep(10 * time.Second)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.terms[reply.Work.FileIndex] == SUCCESS {
+			return
+		}
+		c.terms[reply.Work.FileIndex]++
 		c.tasks <- reply.Work
 	}()
 
@@ -44,10 +50,14 @@ func (c *Coordinator) CallGetWork(args *WorkArgs, reply *WorkReply) error {
 }
 
 func (c *Coordinator) CallReport(args *ReportArgs, reply *ReportReply) error {
-	if !c.timerMap[args.Tid%TimerPoolSize].Stop() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.terms[args.Work.FileIndex] != args.Term {
 		reply.Success = false
 		return nil
 	}
+	c.terms[args.Work.FileIndex] = SUCCESS
 	c.wg.Done()
 	reply.Success = true
 	return nil
@@ -75,6 +85,7 @@ func (c *Coordinator) Done() bool {
 
 func StartReduceWork(c *Coordinator) {
 	c.wg.Wait()
+	c.terms = make([]int, c.nReduce)
 	for i := 0; i < c.nReduce; i++ {
 		c.tasks <- Work{
 			WorkType:  REDUCE,
@@ -105,12 +116,12 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	c := Coordinator{
-		nMap:     len(files),
-		nReduce:  nReduce,
-		wg:       sync.WaitGroup{},
-		tasks:    make(chan Work, buflen),
-		timerMap: make([]*time.Timer, TimerPoolSize),
-		done:     false,
+		nMap:    len(files),
+		nReduce: nReduce,
+		wg:      sync.WaitGroup{},
+		tasks:   make(chan Work, buflen),
+		terms:   make([]int, len(files)),
+		done:    false,
 	}
 
 	for idx, file := range files {

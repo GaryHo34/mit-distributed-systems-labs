@@ -48,14 +48,14 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		switch r.Work.WorkType {
 		case MAP:
-			DoMapWork(r.Work, mapf, r.Tid)
+			DoMapWork(r.Work, mapf, r.Term)
 		case REDUCE:
-			DoReduceWork(r.Work, reducef, r.Tid)
+			DoReduceWork(r.Work, reducef, r.Term)
 		}
 	}
 }
 
-func DoReduceWork(work Work, reducef func(string, []string) string, tid int) {
+func DoReduceWork(work Work, reducef func(string, []string) string, term int) {
 	fileIndex := work.FileIndex
 	intermediate := []KeyValue{}
 
@@ -108,10 +108,10 @@ func DoReduceWork(work Work, reducef func(string, []string) string, tid int) {
 
 	os.Rename(ofile.Name(), oname)
 
-	CallReport(work, tid)
+	CallReport(work, term)
 }
 
-func DoMapWork(work Work, mapf func(string, string) []KeyValue, tid int) {
+func DoMapWork(work Work, mapf func(string, string) []KeyValue, term int) {
 	filename := work.Filename
 
 	file, err := os.Open(filename)
@@ -156,13 +156,13 @@ func DoMapWork(work Work, mapf func(string, string) []KeyValue, tid int) {
 		os.Rename(imtFile.Name(), imtFilename)
 	}
 
-	CallReport(work, tid)
+	CallReport(work, term)
 }
 
-func CallReport(w Work, tid int) {
+func CallReport(w Work, term int) {
 	args := ReportArgs{
 		Work: w,
-		Tid:  tid,
+		Term: term,
 	}
 	reply := ReportReply{}
 	ok := call("Coordinator.CallReport", &args, &reply)
