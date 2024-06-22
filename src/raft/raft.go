@@ -41,6 +41,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 3D:
 	SnapshotValid bool
@@ -73,9 +74,12 @@ type Raft struct {
 	heartbeatTimeout  time.Duration
 	electionTimeout   time.Duration
 	electionTimeStamp time.Time
+	applyCh           chan ApplyMsg
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	broadcasterCond []*sync.Cond
+	applierCond     *sync.Cond
 
 	// server state
 	state ServerState
@@ -160,12 +164,25 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if rf.state != LEADER {
+		return -1, -1, false
+	}
+	newEntry := Entry{
+		Term:    rf.currentTerm,
+		Index:   len(rf.logs),
+		Command: command,
+	}
+	rf.logs = append(rf.logs, newEntry)
+	for peer := range rf.peers {
+		if peer != rf.me {
+			rf.broadcasterCond[peer].Signal()
+		}
+	}
 	// Your code here (3B).
-	return index, term, isLeader
+	return len(rf.logs) - 1, rf.currentTerm, true
 }
 
 // Warning: this function is not thread-safe. You must acquire the lock
@@ -199,6 +216,37 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// a dedicated applier goroutine to guarantee that each log will be push into applyCh exactly once, ensuring that service's applying entries and raft's committing entries can be parallel
+func (rf *Raft) applier() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		// if there is no need to apply entries, just release CPU and wait other goroutine's signal if they commit new entries
+		for rf.lastApplied >= rf.commitIndex {
+			rf.applierCond.Wait()
+		}
+		commitIndex, lastApplied := rf.commitIndex, rf.lastApplied
+		entries := make([]Entry, commitIndex-lastApplied)
+		copy(entries, rf.logs[lastApplied+1:commitIndex+1])
+		rf.mu.Unlock()
+		for _, entry := range entries {
+			DPrintf("[%d]: apply entry %v\n", rf.me, entry)
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandTerm:  entry.Term,
+				CommandIndex: entry.Index,
+			}
+		}
+		rf.mu.Lock()
+		// use commitIndex rather than rf.commitIndex because rf.commitIndex may change during the Unlock() and Lock()
+		// use Max(rf.lastApplied, commitIndex) rather than commitIndex directly to avoid concurrently InstallSnapshot rpc causing lastApplied to rollback
+		if rf.lastApplied < commitIndex {
+			rf.lastApplied = commitIndex
+		}
+		rf.mu.Unlock()
+	}
+}
+
 /**
  * Lets illustrate the time line of the ticker function
  * e: election timeout
@@ -230,7 +278,11 @@ func (rf *Raft) ticker() {
 		time.Sleep(rf.heartbeatTimeout)
 
 		if rf.state == LEADER {
-			rf.broadcastAppendEntries(true)
+			for peer := range rf.peers {
+				if peer != rf.me {
+					rf.broadcastHeartbeat(peer)
+				}
+			}
 		}
 
 		// Lock must before the check of election timeout (a goroutine may
@@ -261,6 +313,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
 	rf.heartbeatTimeout = 50 * time.Millisecond
 	rf.resetElectionTimer()
 	// Your initialization code here (3A, 3B, 3C).
@@ -273,19 +326,26 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.applierCond = sync.NewCond(&rf.mu)
+	rf.broadcasterCond = make([]*sync.Cond, len(peers))
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	lastLog := rf.logs[len(rf.logs)-1]
 	for id := range peers {
+		rf.nextIndex[id], rf.matchIndex[id] = lastLog.Index+1, 0
 		if id != rf.me {
-			rf.nextIndex[id], rf.matchIndex[id] = lastLog.Index+1, 0
+			rf.broadcasterCond[id] = sync.NewCond(&sync.Mutex{})
+			go rf.broadcaster(id)
 		}
 	}
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applier()
 
 	return rf
 }

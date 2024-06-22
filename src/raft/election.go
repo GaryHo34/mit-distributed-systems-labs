@@ -26,29 +26,34 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	reply.VoteGranted = false
-	reply.Term = rf.currentTerm
-
-	// candidate's term is less than the current term, implies that the request
-	// is invalid, reject the vote without changing our state
+	// Reply false if term < currentTerm (§5.1)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
 		return
 	}
 
-	// Recieved a newer term, update our term and reset our state to follower
+	// If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
 		rf.resetNewTermState(args.Term)
 	}
 
-	lastLog := rf.logs[len(rf.logs)-1]
-	upToDate := args.LastLogTerm > lastLog.Term ||
-		(args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLog.Index)
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && upToDate {
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isUpToDate(args) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.resetElectionTimer()
 	}
+}
+
+func (rf *Raft) isUpToDate(args *RequestVoteArgs) bool {
+	lastLog := rf.logs[len(rf.logs)-1]
+	candidateIndex := args.LastLogIndex
+	candidateTerm := args.LastLogTerm
+	return candidateTerm > lastLog.Term || (candidateTerm == lastLog.Term && candidateIndex >= lastLog.Index)
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *int32) {
@@ -64,7 +69,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 	if !reply.VoteGranted {
 		if reply.Term > rf.currentTerm {
 			rf.resetNewTermState(reply.Term)
-			return
 		}
 		DPrintf("[%d]: not received vote from %d\n", rf.me, server)
 		return
@@ -72,17 +76,21 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 
 	DPrintf("[%d]: received vote from %d\n", rf.me, server)
 
-	if atomic.AddInt32(voteCount, 1) >= int32(len(rf.peers)/2) &&
+	if atomic.AddInt32(voteCount, 1) > int32(len(rf.peers)/2) &&
 		rf.state == CANDIDATE &&
 		rf.currentTerm == args.Term {
-		DPrintf("[%d]: election ends\n", rf.me)
 		rf.state = LEADER
-		// lastLogIndex := rf.log.lastLog().Index
-		// for i, _ := range rf.peers {
-		// 	rf.nextIndex[i] = lastLogIndex + 1
-		// 	rf.matchIndex[i] = 0
-		// }
-		rf.broadcastAppendEntries(true)
+		lastLogIndex := rf.logs[len(rf.logs)-1].Index
+		for i := range rf.peers {
+			rf.nextIndex[i] = lastLogIndex + 1
+			rf.matchIndex[i] = 0
+		}
+		DPrintf("[%d]: become leader for term %d\n", rf.me, rf.currentTerm)
+		for peer := range rf.peers {
+			if peer != rf.me {
+				rf.broadcastHeartbeat(peer)
+			}
+		}
 	}
 }
 
