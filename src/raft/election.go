@@ -24,6 +24,7 @@ type RequestVoteReply struct {
 // Restart your election timer if you grant a vote to another peer.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 
 	// Reply false if term < currentTerm (§5.1)
@@ -64,6 +65,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 	}
 
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 
 	if !reply.VoteGranted {

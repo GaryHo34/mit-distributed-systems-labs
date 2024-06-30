@@ -12,8 +12,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term          int  // currentTerm, for leader to update itself
+	Success       bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	ConflictIndex int  // the index of the first conflicting entry
 }
 
 // AppendEntries RPC handler
@@ -21,8 +22,10 @@ type AppendEntriesReply struct {
 // (i.e., if the term of the AppendEntries arguments is outdated, you should not reset your timer);
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 	reply.Success = false
+	reply.ConflictIndex = -1
 	DPrintf("Server %d received AppendEntries from %d, args: %v", rf.me, args.LeaderId, args)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -42,7 +45,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.resetElectionTimer()
 	reply.Term = rf.currentTerm
 
-	//Reply false if log doesn’t contain an entry at prevLogIndex
+	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex >= len(rf.logs) {
 		return
@@ -52,7 +55,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// but different terms), delete the existing entry and all that
 	// follow it (§5.3)
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		rf.logs = rf.logs[:args.PrevLogIndex]
+		// optimization
+		curTerm := rf.logs[args.PrevLogIndex].Term
+		var conflictIndex int
+		for i := args.PrevLogIndex; i > 0; i-- {
+			if rf.logs[i-1].Term != curTerm {
+				conflictIndex = i
+				break
+			}
+		}
+		reply.ConflictIndex = conflictIndex
 		return
 	}
 	for _, entry := range args.Entries {
@@ -64,12 +76,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("Server %d received entries from leader %d: %v", rf.me, args.LeaderId, rf.logs)
 	reply.Success = true
 	if args.CommitIndex > rf.commitIndex {
+		rf.commitIndex = args.CommitIndex
 		if args.CommitIndex >= len(rf.logs) {
-			DPrintf("Server %d commitIndex: %d, len(rf.logs): %d", rf.me, args.CommitIndex, len(rf.logs))
 			rf.commitIndex = len(rf.logs) - 1
-		} else {
-			DPrintf("Server %d commitIndex: %d", rf.me, args.CommitIndex)
-			rf.commitIndex = args.CommitIndex
 		}
 	}
 	rf.applierCond.Signal()
@@ -85,6 +94,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	}
 	DPrintf("Server %d args %v reply %v", rf.me, args.Entries, reply)
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 
 	// The term is outdated, do not reset the election timer
@@ -95,9 +105,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 
 	// If successful: update nextIndex and matchIndex for
 	// follower (§5.3)
-	if reply.Success && len(args.Entries) > 0 {
+	if reply.Success {
 		DPrintf("Server %d received success from %d, nextIndex: %v, matchIndex: %v", rf.me, server, rf.nextIndex, rf.matchIndex)
-		rf.nextIndex[server] = args.Entries[len(args.Entries)-1].Index + 1
+		if len(args.Entries) > 0 {
+			rf.nextIndex[server] = args.Entries[len(args.Entries)-1].Index + 1
+		}
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
 		for index := range rf.logs {
 			count := 1
@@ -113,10 +125,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 				rf.commitIndex = index
 			}
 		}
-	} else if !reply.Success {
-		rf.nextIndex[server]--
-		if rf.nextIndex[server] < 0 {
-			rf.nextIndex[server] = 0
+	} else {
+		rf.nextIndex[server] = reply.ConflictIndex - 1
+		if rf.nextIndex[server] < 1 {
+			rf.nextIndex[server] = 1
 		}
 	}
 
@@ -152,6 +164,7 @@ func (rf *Raft) broadcaster(peer int) {
 
 func (rf *Raft) noNeedReplicating(peer int) bool {
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 	return rf.state != LEADER || rf.matchIndex[peer] >= rf.logs[len(rf.logs)-1].Index
 }
