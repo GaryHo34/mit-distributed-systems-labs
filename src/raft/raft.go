@@ -107,6 +107,15 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == LEADER
 }
 
+func (rf *Raft) encodeState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	return w.Bytes()
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -115,13 +124,11 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.logs)
-	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	if rf.persister.ReadSnapshot() != nil {
+		rf.persister.Save(rf.encodeState(), rf.persister.ReadSnapshot())
+	} else {
+		rf.persister.Save(rf.encodeState(), nil)
+	}
 }
 
 // restore previously persisted state.
@@ -142,6 +149,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logs = logs
+		rf.lastApplied = rf.logs[0].Index
 	}
 }
 
@@ -151,7 +159,18 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// if the snapshot is outdated, just ignore it
+	if rf.logs[0].Index >= index {
+		return
+	}
+	firstLogIndex := rf.logs[0].Index
+	trimLen := index - firstLogIndex
+	// trim the logs
+	rf.logs = append([]Entry{}, rf.logs[trimLen:]...)
+	rf.logs[0].Command = nil
+	rf.persister.Save(rf.encodeState(), snapshot)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -168,7 +187,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	defer rf.persist()
 	defer rf.mu.Unlock()
 
 	if rf.state != LEADER {
@@ -176,21 +194,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	newEntry := Entry{
 		Term:    rf.currentTerm,
-		Index:   len(rf.logs),
+		Index:   rf.logs[len(rf.logs)-1].Index + 1,
 		Command: command,
 	}
 	rf.logs = append(rf.logs, newEntry)
-	for peer := range rf.peers {
-		if peer != rf.me {
-			rf.broadcasterCond[peer].Signal()
-		}
-	}
+	rf.broadcastAppendEntries(false)
 	// Your code here (3B).
-	return len(rf.logs) - 1, rf.currentTerm, true
+	return rf.logs[len(rf.logs)-1].Index, rf.currentTerm, true
 }
 
-// Warning: this function is not thread-safe. You must acquire the lock
-// before calling this function.
+// Warning: this function is not thread-safe
 func (rf *Raft) resetNewTermState(targetTerm int) {
 	DPrintfWithCaller("[%d]: received newer term, set term to %d\n", rf.me, targetTerm)
 	if rf.currentTerm < targetTerm {
@@ -198,7 +211,28 @@ func (rf *Raft) resetNewTermState(targetTerm int) {
 	}
 	rf.currentTerm = targetTerm
 	rf.state = FOLLOWER // reset to follower
-	rf.persist()
+}
+
+// Warning: this function is not thread-safe
+// Test if the caller's term is valid, if not, return false
+func (rf *Raft) isCallerTermValid(argsTerm int) bool {
+	if argsTerm < rf.currentTerm {
+		return false
+	}
+	if argsTerm > rf.currentTerm {
+		rf.resetNewTermState(argsTerm)
+	}
+	return true
+}
+
+// Warning: this function is not thread-safe
+func (rf *Raft) isReplyTermGreater(replyTerm int) bool {
+	if replyTerm > rf.currentTerm {
+		DPrintf("[%d]: received higher term %d from %d\n", rf.me, replyTerm, rf.me)
+		rf.resetNewTermState(replyTerm)
+		return true
+	}
+	return false
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -220,6 +254,23 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) isReplicationNeeded(peer int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.state == LEADER && rf.matchIndex[peer] < rf.logs[len(rf.logs)-1].Index
+}
+
+func (rf *Raft) broadcaster(peer int) {
+	rf.broadcasterCond[peer].L.Lock()
+	defer rf.broadcasterCond[peer].L.Unlock()
+	for !rf.killed() {
+		for !rf.isReplicationNeeded(peer) {
+			rf.broadcasterCond[peer].Wait()
+		}
+		rf.prepareAppendEntries(peer, false)
+	}
+}
+
 // a dedicated applier goroutine to guarantee that each log will be push into applyCh exactly once, ensuring that service's applying entries and raft's committing entries can be parallel
 func (rf *Raft) applier() {
 	for !rf.killed() {
@@ -228,12 +279,14 @@ func (rf *Raft) applier() {
 		for rf.lastApplied >= rf.commitIndex {
 			rf.applierCond.Wait()
 		}
+		firstLogIndex := rf.logs[0].Index
 		commitIndex, lastApplied := rf.commitIndex, rf.lastApplied
 		entries := make([]Entry, commitIndex-lastApplied)
-		copy(entries, rf.logs[lastApplied+1:commitIndex+1])
+		DPrintf("[%d]: apply entries last applied: %d, commit index: %d, first log: %d\n", rf.me, lastApplied, commitIndex, firstLogIndex)
+		copy(entries, rf.logs[lastApplied+1-firstLogIndex:commitIndex+1-firstLogIndex])
 		rf.mu.Unlock()
 		for _, entry := range entries {
-			DPrintf("[%d]: apply entry %v\n", rf.me, entry)
+			DPrintf("[%d]: apply entry %+v\n", rf.me, entry)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      entry.Command,
@@ -247,7 +300,6 @@ func (rf *Raft) applier() {
 		if rf.lastApplied < commitIndex {
 			rf.lastApplied = commitIndex
 		}
-		rf.persist()
 		rf.mu.Unlock()
 	}
 }
@@ -283,11 +335,7 @@ func (rf *Raft) ticker() {
 		time.Sleep(rf.heartbeatTimeout)
 
 		if rf.state == LEADER {
-			for peer := range rf.peers {
-				if peer != rf.me {
-					rf.broadcastHeartbeat(peer)
-				}
-			}
+			rf.broadcastAppendEntries(true)
 		}
 
 		// Lock must before the check of election timeout (a goroutine may

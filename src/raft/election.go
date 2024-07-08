@@ -27,21 +27,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.persist()
 	defer rf.mu.Unlock()
 
-	// Reply false if term < currentTerm (§5.1)
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		return
-	}
+	reply.VoteGranted = false
+	reply.Term = rf.currentTerm
 
+	// Reply false if term < currentTerm (§5.1)
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower (§5.1)
-	if args.Term > rf.currentTerm {
-		rf.resetNewTermState(args.Term)
+	if !rf.isCallerTermValid(args.Term) {
+		return
 	}
-
-	reply.Term = rf.currentTerm
-	reply.VoteGranted = false
 
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isUpToDate(args) {
 		reply.VoteGranted = true
@@ -68,10 +62,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 	defer rf.persist()
 	defer rf.mu.Unlock()
 
+	if rf.isReplyTermGreater(reply.Term) {
+		return
+	}
+
 	if !reply.VoteGranted {
-		if reply.Term > rf.currentTerm {
-			rf.resetNewTermState(reply.Term)
-		}
 		DPrintf("[%d]: not received vote from %d\n", rf.me, server)
 		return
 	}
@@ -87,12 +82,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 			rf.nextIndex[i] = lastLogIndex + 1
 			rf.matchIndex[i] = 0
 		}
-		DPrintf("[%d]: become leader for term %d\n", rf.me, rf.currentTerm)
-		for peer := range rf.peers {
-			if peer != rf.me {
-				rf.broadcastHeartbeat(peer)
-			}
-		}
+		DPrintf("[%d]: become leader to term %d\n", rf.me, rf.currentTerm)
+		rf.broadcastAppendEntries(true)
 	}
 }
 
