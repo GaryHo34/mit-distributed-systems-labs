@@ -14,59 +14,71 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type Cache struct {
+	seq   int
+	value string
+}
+
 type KVServer struct {
-	mu         sync.Mutex
-	data       map[string]string
-	appenTable map[int64](map[int]string)
-	putTable   map[int64]int
-	// Your definitions here.
+	mu    sync.Mutex
+	data  map[string]string
+	cache map[int64]*Cache // client id -> seq ->value
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if val, ok := kv.data[args.Key]; ok {
-		reply.Value = val
+	clientId, seqNum := args.ClientId, args.SeqNum
+	key := args.Key
+	reply.Value = ""
+	// Either the client is new or the seqNum is greater than the cache seqNum.
+	// In both cases, we can return the value directly.
+	if ca, ok := kv.cache[clientId]; !ok || ca.seq <= seqNum {
+		reply.Value = kv.data[key]
 		return
 	}
-	reply.Value = ""
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if prevSeq, ok := kv.putTable[args.CId]; ok && prevSeq >= args.Seq {
+	clientId, seqNum := args.ClientId, args.SeqNum
+	k, v := args.Key, args.Value
+	reply.Value = ""
+	if ca, ok := kv.cache[clientId]; ok && ca.seq >= seqNum {
 		return
+	} else if !ok {
+		kv.cache[clientId] = new(Cache)
 	}
-	kv.putTable[args.CId] = args.Seq
-	kv.data[args.Key] = args.Value
+	kv.data[k] = v
+	kv.cache[clientId].seq = seqNum
+	kv.cache[clientId].value = reply.Value
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if _, ok := kv.appenTable[args.CId]; !ok {
-		kv.appenTable[args.CId] = make(map[int]string)
-	}
-	if val, ok := kv.appenTable[args.CId][args.Seq]; ok {
-		reply.Value = val
+	clientId, seqNum := args.ClientId, args.SeqNum
+	k, v := args.Key, args.Value
+	reply.Value = ""
+	// For ca.seq == seqNum, it means that the value has been appended.
+	// However, the response might be lost, so we return the cache value.
+	// For ca.seq > seqNum, it doesnt matter what the value is, just return.
+	if ca, ok := kv.cache[clientId]; ok && ca.seq >= seqNum {
+		reply.Value = ca.value
 		return
+	} else if !ok {
+		kv.cache[clientId] = new(Cache)
 	}
-	kv.appenTable[args.CId][args.Seq] = kv.data[args.Key]
-	reply.Value = kv.appenTable[args.CId][args.Seq]
-	kv.data[args.Key] += args.Value
-	delete(kv.appenTable[args.CId], args.Seq-1)
+	reply.Value = kv.data[k]
+	kv.cache[clientId].seq = seqNum
+	kv.cache[clientId].value = kv.data[k]
+	kv.data[k] += v
 }
 
 func StartKVServer() *KVServer {
 	kv := new(KVServer)
-
-	// You may need initialization code here.
 	kv.data = make(map[string]string)
-	kv.appenTable = make(map[int64](map[int]string))
-	kv.putTable = make(map[int64]int)
+	kv.cache = make(map[int64]*Cache)
 	return kv
 }
