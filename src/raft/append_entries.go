@@ -1,5 +1,7 @@
 package raft
 
+import "fmt"
+
 // Source: https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf, Figure 2
 
 type AppendEntriesArgs struct {
@@ -22,9 +24,9 @@ type AppendEntriesReply struct {
 // (i.e., if the term of the AppendEntries arguments is outdated, you should not reset your timer);
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.persist()
 	defer rf.mu.Unlock()
-	DPrintf("Server %d received AppendEntries from %d, args: %v", rf.me, args.LeaderId, args)
+	defer rf.persist()
+	DPrintf("(AppendEntries) [%d] recieve from %d, Term: %d, PrevLogIndex: %d, PrevLogTerm: %d\n", rf.me, args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm)
 
 	reply.Success = false
 	reply.ConflictIndex = -1
@@ -71,14 +73,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictIndex = conflictIndex + rf.logs[0].Index
 		return
 	}
-	for _, entry := range args.Entries {
+	for idx, entry := range args.Entries {
 		logIndex := entry.Index - rf.logs[0].Index
 		if logIndex >= len(rf.logs) || rf.logs[logIndex].Term != entry.Term {
-			rf.logs = append([]Entry{}, append(rf.logs[:prevLogIndex+1], args.Entries...)...)
+			DPrintf("(AppendEntries) [%d] append logs: %v from\n", rf.me, args.Entries)
+			rf.logs = append([]Entry{}, append(rf.logs[:logIndex], args.Entries[idx:]...)...)
 			break
 		}
 	}
-	DPrintf("Server %d received entries from leader %d: %v", rf.me, args.LeaderId, rf.logs)
 	reply.Success = true
 	if args.CommitIndex > rf.commitIndex {
 		rf.commitIndex = args.CommitIndex
@@ -91,16 +93,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
-	DPrintf("Server %d sendAppendEntries to %d, args: %v", rf.me, server, args)
+	DPrintf("(AppendEntries) [%d] send to %d, Term: %d, PrevLogIndex: %d, PrevLogTerm: %d\n", rf.me, server, args.Term, args.PrevLogIndex, args.PrevLogTerm)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
 
 	if !ok {
 		return
 	}
-	DPrintf("Server %d args %v reply %v", rf.me, args.Entries, reply)
+	DPrintf("(AppendEntries) [%d] recieve reply from %d, Term: %d, Success: %v, ConflictIndex: %d\n", rf.me, server, reply.Term, reply.Success, reply.ConflictIndex)
 	rf.mu.Lock()
-	defer rf.persist()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// The term is outdated, do not reset the election timer
 	if rf.isReplyTermGreater(reply.Term) {
@@ -110,7 +112,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	// If successful: update nextIndex and matchIndex for
 	// follower (§5.3)
 	if reply.Success {
-		DPrintf("Server %d received success from %d, nextIndex: %v, matchIndex: %v", rf.me, server, rf.nextIndex, rf.matchIndex)
 		if len(args.Entries) > 0 {
 			rf.nextIndex[server] = args.Entries[len(args.Entries)-1].Index + 1
 		}
@@ -136,7 +137,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 			rf.nextIndex[server] = 1
 		}
 	}
-
+	DPrintf("(AppendEntries) [%d] nextIndex: %v, matchIndex: %v, commitIndex: %d\n", rf.me, rf.nextIndex, rf.matchIndex, rf.commitIndex)
 	rf.applierCond.Signal()
 }
 
@@ -154,19 +155,27 @@ func (rf *Raft) broadcastAppendEntries(isHeartBeat bool) {
 }
 
 func (rf *Raft) prepareAppendEntries(peer int, isAsync bool) {
+	rf.mu.Lock()
 	firstLog := rf.logs[0]
 	nextIndex := rf.nextIndex[peer]
 	if nextIndex > firstLog.Index {
 		nextIndex -= firstLog.Index
+		if nextIndex > len(rf.logs) {
+			fmt.Printf("Server %d nextIndex %d >= len(rf.logs) %d\n", rf.me, nextIndex, len(rf.logs))
+			nextIndex = len(rf.logs)
+		}
 		prevLog := rf.logs[nextIndex-1]
+		logs := make([]Entry, len(rf.logs[nextIndex:]))
+		copy(logs, rf.logs[nextIndex:])
 		args := AppendEntriesArgs{
 			LeaderId:     rf.me,
 			Term:         rf.currentTerm,
 			PrevLogIndex: prevLog.Index,
 			PrevLogTerm:  prevLog.Term,
-			Entries:      rf.logs[nextIndex:],
+			Entries:      logs,
 			CommitIndex:  rf.commitIndex,
 		}
+		rf.mu.Unlock()
 		if isAsync {
 			go rf.sendAppendEntries(peer, &args)
 		} else {
@@ -182,6 +191,7 @@ func (rf *Raft) prepareAppendEntries(peer int, isAsync bool) {
 			Data:              rf.persister.ReadSnapshot(),
 			Done:              true,
 		}
+		rf.mu.Unlock()
 		if isAsync {
 			go rf.sendInstallSnapshot(peer, args)
 		} else {

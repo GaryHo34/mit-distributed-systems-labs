@@ -17,11 +17,10 @@ type InstallSnapshotReply struct {
 // InstallSnapshot RPC handler
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 
 	if !rf.isCallerTermValid(args.Term) {
-		rf.mu.Unlock()
 		return
 	}
 
@@ -29,12 +28,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.state = FOLLOWER
 	}
 
-	rf.resetElectionTimer()
-
 	if args.LastIncludedIndex <= rf.commitIndex {
-		rf.mu.Unlock()
 		return
 	}
+
+	rf.resetElectionTimer()
 
 	rf.commitIndex = args.LastIncludedIndex
 	rf.lastApplied = args.LastIncludedIndex
@@ -42,7 +40,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// 3. Write data into snapshot file at given offset
 	// 4. Reply and wait for more data chunks if done is false
 	if !args.Done {
-		rf.mu.Unlock()
 		return
 	}
 	// 5. Save snapshot file, discard any existing or partial snapshot with a
@@ -53,7 +50,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// 8. Reset state machine using snapshot contents (and load snapshot’s
 	//    cluster configuration)
 	firstLogIndex := rf.logs[0].Index
-	if rf.logs[0].Index <= args.LastIncludedIndex {
+	if firstLogIndex <= args.LastIncludedIndex {
 		rf.logs = append([]Entry{}, Entry{
 			Index:   args.LastIncludedIndex,
 			Term:    args.LastIncludedTerm,
@@ -65,7 +62,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.logs[0].Command = nil
 	}
 	rf.persister.Save(rf.encodeState(), args.Data)
-	rf.mu.Unlock()
 	rf.applyCh <- ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,

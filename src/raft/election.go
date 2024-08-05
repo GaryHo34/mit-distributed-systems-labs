@@ -24,8 +24,8 @@ type RequestVoteReply struct {
 // Restart your election timer if you grant a vote to another peer.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	defer rf.persist()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	reply.VoteGranted = false
 	reply.Term = rf.currentTerm
@@ -59,8 +59,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 	}
 
 	rf.mu.Lock()
-	defer rf.persist()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	if rf.isReplyTermGreater(reply.Term) {
 		return
@@ -83,11 +83,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 			rf.matchIndex[i] = 0
 		}
 		DPrintf("[%d]: become leader to term %d\n", rf.me, rf.currentTerm)
-		rf.broadcastAppendEntries(true)
+		go rf.broadcastAppendEntries(true)
 	}
 }
 
 func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	rf.currentTerm++
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
@@ -112,8 +115,16 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) resetElectionTimer() {
+	rf.elecmu.Lock()
+	defer rf.elecmu.Unlock()
 	// Choose from 150 to 300
-	ms := 150 + (rand.Int63() % 150)
+	ms := 50 + (rand.Int63() % 150)
 	rf.electionTimeStamp = time.Now()
 	rf.electionTimeout = time.Duration(ms) * time.Millisecond
+}
+
+func (rf *Raft) isElectionTimeout() bool {
+	rf.elecmu.Lock()
+	defer rf.elecmu.Unlock()
+	return time.Now().After(rf.electionTimeStamp.Add(rf.electionTimeout))
 }

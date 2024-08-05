@@ -70,6 +70,7 @@ const (
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu                sync.Mutex          // Lock to protect shared access to this peer's state
+	elecmu            sync.Mutex          // Lock to protect election state
 	peers             []*labrpc.ClientEnd // RPC end points of all peers
 	persister         *Persister          // Object to hold this peer's persisted state
 	me                int                 // this peer's index into peers[]
@@ -104,6 +105,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == LEADER
 }
 
@@ -133,7 +136,7 @@ func (rf *Raft) persist() {
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if data == nil || len(data) < 1 { // bootstrap without any state
 		return
 	}
 	r := bytes.NewBuffer(data)
@@ -188,16 +191,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	defer DPrintf("(Start) [%d]: command %+v, index:%d, term: %d\n", rf.me, command, rf.logs[len(rf.logs)-1].Index, rf.currentTerm)
 	if rf.state != LEADER {
 		return -1, -1, false
 	}
-	newEntry := Entry{
+	rf.logs = append(rf.logs, Entry{
 		Term:    rf.currentTerm,
 		Index:   rf.logs[len(rf.logs)-1].Index + 1,
 		Command: command,
-	}
-	rf.logs = append(rf.logs, newEntry)
+	})
 	rf.broadcastAppendEntries(false)
 	// Your code here (3B).
 	return rf.logs[len(rf.logs)-1].Index, rf.currentTerm, true
@@ -228,7 +230,6 @@ func (rf *Raft) isCallerTermValid(argsTerm int) bool {
 // Warning: this function is not thread-safe
 func (rf *Raft) isReplyTermGreater(replyTerm int) bool {
 	if replyTerm > rf.currentTerm {
-		DPrintf("[%d]: received higher term %d from %d\n", rf.me, replyTerm, rf.me)
 		rf.resetNewTermState(replyTerm)
 		return true
 	}
@@ -281,12 +282,12 @@ func (rf *Raft) applier() {
 		}
 		firstLogIndex := rf.logs[0].Index
 		commitIndex, lastApplied := rf.commitIndex, rf.lastApplied
+		DPrintf("(applier) [%d]: commitIndex: %d, lastApplied: %d\n", rf.me, commitIndex, lastApplied)
 		entries := make([]Entry, commitIndex-lastApplied)
-		DPrintf("[%d]: apply entries last applied: %d, commit index: %d, first log: %d\n", rf.me, lastApplied, commitIndex, firstLogIndex)
 		copy(entries, rf.logs[lastApplied+1-firstLogIndex:commitIndex+1-firstLogIndex])
 		rf.mu.Unlock()
 		for _, entry := range entries {
-			DPrintf("[%d]: apply entry %+v\n", rf.me, entry)
+			DPrintf("(applier) [%d]: apply entry %+v\n", rf.me, entry)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      entry.Command,
@@ -329,23 +330,18 @@ func (rf *Raft) applier() {
  */
 func (rf *Raft) ticker() {
 	for !rf.killed() {
-
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		time.Sleep(rf.heartbeatTimeout)
 
-		if rf.state == LEADER {
-			rf.broadcastAppendEntries(true)
-		}
+		_, isLeader := rf.GetState()
 
-		// Lock must before the check of election timeout (a goroutine may
-		// change the timer concurrently)
-		rf.mu.Lock()
-		if time.Now().After(rf.electionTimeStamp.Add(rf.electionTimeout)) &&
-			rf.state != LEADER {
+		if isLeader {
+			rf.broadcastAppendEntries(true)
+			continue
+		} else if rf.isElectionTimeout() {
 			rf.startElection()
 		}
-		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 	}

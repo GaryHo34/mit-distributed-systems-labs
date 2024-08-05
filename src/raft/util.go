@@ -2,12 +2,13 @@ package raft
 
 import (
 	"log"
+	"os"
 	"runtime"
 	"strings"
 )
 
 // Debugging
-const Debug = false
+var Debug = os.Getenv("DEBUG") == "1"
 
 func DPrintf(format string, a ...interface{}) {
 	if !Debug {
