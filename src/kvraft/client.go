@@ -1,13 +1,18 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"6.5840/labrpc"
+)
+
+var id = int64(0)
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers  []*labrpc.ClientEnd
+	clientId int64
+	seqNum   int
 }
 
 func nrand() int64 {
@@ -20,7 +25,9 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.clientId = id
+	id++
+	ck.seqNum = 0
 	return ck
 }
 
@@ -35,9 +42,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	ck.seqNum++
+	args := GetArgs{
+		Key:      key,
+		ClientId: ck.clientId,
+		SeqNum:   ck.seqNum,
+	}
+	for {
+		for _, server := range ck.servers {
+			reply := GetReply{}
+			ok := server.Call("KVServer.Get", &args, &reply)
+			if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+				return reply.Value
+			}
+		}
+	}
 }
 
 // shared by Put and Append.
@@ -49,7 +68,23 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	ck.seqNum++
+	args := PutAppendArgs{
+		Op:       op,
+		Key:      key,
+		Value:    value,
+		ClientId: ck.clientId,
+		SeqNum:   ck.seqNum,
+	}
+	for {
+		for _, server := range ck.servers {
+			reply := PutAppendReply{}
+			ok := server.Call("KVServer.PutAppend", &args, &reply)
+			if ok && reply.Err == OK {
+				return
+			}
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

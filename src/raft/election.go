@@ -118,7 +118,7 @@ func (rf *Raft) resetElectionTimer() {
 	rf.elecmu.Lock()
 	defer rf.elecmu.Unlock()
 	// Choose from 150 to 300
-	ms := 50 + (rand.Int63() % 150)
+	ms := 150 + (rand.Int63() % 150)
 	rf.electionTimeStamp = time.Now()
 	rf.electionTimeout = time.Duration(ms) * time.Millisecond
 }
