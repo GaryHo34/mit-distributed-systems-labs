@@ -71,7 +71,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for idx, entry := range args.Entries {
 		logIndex := entry.Index - rf.logs[0].Index
 		if logIndex >= len(rf.logs) || rf.logs[logIndex].Term != entry.Term {
-			DPrintf("(AppendEntries) [%d] append logs: %v from\n", rf.me, args.Entries)
+			DPrintf("(AppendEntries) [%d] append logs: %v\n", rf.me, args.Entries)
 			rf.logs = append([]Entry{}, append(rf.logs[:logIndex], args.Entries[idx:]...)...)
 			break
 		}

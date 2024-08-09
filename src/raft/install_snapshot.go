@@ -23,14 +23,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
-	if rf.state == CANDIDATE {
-		rf.state = FOLLOWER
-	}
-
 	if args.LastIncludedIndex <= rf.commitIndex {
 		return
 	}
-
+	prevCommitIndex := rf.commitIndex
+	prevLastApplied := rf.lastApplied
+	defer DPrintf("(InstallSnapshot) [%d]: LastIncludedIndex: %d, LastIncludedTerm: %d, prevCommitIndex: %d, prevLastApplied: %d\n", rf.me, args.LastIncludedIndex, args.LastIncludedTerm, prevCommitIndex, prevLastApplied)
 	rf.resetElectionTimer()
 
 	rf.commitIndex = args.LastIncludedIndex

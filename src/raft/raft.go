@@ -171,6 +171,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.votedFor = votedFor
 		rf.logs = logs
 		rf.lastApplied = rf.logs[0].Index
+		rf.commitIndex = rf.logs[0].Index
 	}
 }
 
@@ -209,10 +210,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer DPrintf("(Start) [%d]: command %+v, index:%d, term: %d\n", rf.me, command, rf.logs[len(rf.logs)-1].Index, rf.currentTerm)
 	if rf.state != LEADER {
 		return -1, -1, false
 	}
+	defer DPrintf("(Start) [%d]: command %+v, index:%d, term: %d\n", rf.me, command, rf.logs[len(rf.logs)-1].Index, rf.currentTerm)
 	rf.logs = append(rf.logs, Entry{
 		Term:    rf.currentTerm,
 		Index:   rf.logs[len(rf.logs)-1].Index + 1,
@@ -238,13 +239,12 @@ func (rf *Raft) resetNewTermState(targetTerm int) {
 // set currentTerm = T, convert to follower (§5.1)
 func (rf *Raft) checkRequestTerm(args, reply RaftRPC) bool {
 	term := args.GetTerm()
+	defer reply.SetTerm(rf.currentTerm)
 	if term < rf.currentTerm {
-		reply.SetTerm(rf.currentTerm)
 		return false
 	}
 	if term > rf.currentTerm {
 		rf.resetNewTermState(term)
-		reply.SetTerm(term)
 	}
 	return true
 }
@@ -307,7 +307,7 @@ func (rf *Raft) applier() {
 		}
 		firstLogIndex := rf.logs[0].Index
 		commitIndex, lastApplied := rf.commitIndex, rf.lastApplied
-		DPrintf("(applier) [%d]: commitIndex: %d, lastApplied: %d\n", rf.me, commitIndex, lastApplied)
+		DPrintf("(applier) [%d]: commitIndex: %d, lastApplied: %d, logFirstIndex: %d, logLastIndex: %d\n", rf.me, commitIndex, lastApplied, firstLogIndex, rf.logs[len(rf.logs)-1].Index)
 		entries := make([]Entry, commitIndex-lastApplied)
 		copy(entries, rf.logs[lastApplied+1-firstLogIndex:commitIndex+1-firstLogIndex])
 		rf.mu.Unlock()
