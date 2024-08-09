@@ -59,6 +59,26 @@ type Entry struct {
 	Command interface{}
 }
 
+// Base struct for common fields
+type BaseRPC struct {
+	Term int
+}
+
+// Implement RaftRPC interface for BaseRPC
+func (b *BaseRPC) GetTerm() int {
+	return b.Term
+}
+
+func (b *BaseRPC) SetTerm(term int) {
+	b.Term = term
+}
+
+// RaftRPC interface
+type RaftRPC interface {
+	GetTerm() int
+	SetTerm(int)
+}
+
 type ServerState int
 
 const (
@@ -70,7 +90,6 @@ const (
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu                sync.Mutex          // Lock to protect shared access to this peer's state
-	elecmu            sync.Mutex          // Lock to protect election state
 	peers             []*labrpc.ClientEnd // RPC end points of all peers
 	persister         *Persister          // Object to hold this peer's persisted state
 	me                int                 // this peer's index into peers[]
@@ -79,8 +98,7 @@ type Raft struct {
 	electionTimeout   time.Duration
 	electionTimeStamp time.Time
 	applyCh           chan ApplyMsg
-	// Your data here (3A, 3B, 3C).
-	// Look at the paper's Figure 2 for a description of what
+
 	// state a Raft server must maintain.
 	broadcasterCond []*sync.Cond
 	applierCond     *sync.Cond
@@ -207,7 +225,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // Warning: this function is not thread-safe
 func (rf *Raft) resetNewTermState(targetTerm int) {
-	DPrintfWithCaller("[%d]: received newer term, set term to %d\n", rf.me, targetTerm)
+	DPrintf("(ResetTerm)[%d]: received newer term, set term to %d\n", rf.me, targetTerm)
 	if rf.currentTerm < targetTerm {
 		rf.votedFor = -1
 	}
@@ -215,25 +233,32 @@ func (rf *Raft) resetNewTermState(targetTerm int) {
 	rf.state = FOLLOWER // reset to follower
 }
 
-// Warning: this function is not thread-safe
-// Test if the caller's term is valid, if not, return false
-func (rf *Raft) isCallerTermValid(argsTerm int) bool {
-	if argsTerm < rf.currentTerm {
+// Reply false if term < currentTerm (§5.1)
+// If RPC request contains term T > currentTerm:
+// set currentTerm = T, convert to follower (§5.1)
+func (rf *Raft) checkRequestTerm(args, reply RaftRPC) bool {
+	term := args.GetTerm()
+	if term < rf.currentTerm {
+		reply.SetTerm(rf.currentTerm)
 		return false
 	}
-	if argsTerm > rf.currentTerm {
-		rf.resetNewTermState(argsTerm)
+	if term > rf.currentTerm {
+		rf.resetNewTermState(term)
+		reply.SetTerm(term)
 	}
 	return true
 }
 
-// Warning: this function is not thread-safe
-func (rf *Raft) isReplyTermGreater(replyTerm int) bool {
-	if replyTerm > rf.currentTerm {
-		rf.resetNewTermState(replyTerm)
-		return true
+// If RPC request or response contains term T > currentTerm:
+// set currentTerm = T, convert to follower (§5.1)
+func (rf *Raft) checkResponseTerm(reply RaftRPC) bool {
+	term := reply.GetTerm()
+	if term > rf.currentTerm {
+		rf.resetNewTermState(term)
+		rf.resetElectionTimer()
+		return false
 	}
-	return false
+	return true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -363,7 +388,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
-	rf.heartbeatTimeout = 50 * time.Millisecond
+	rf.heartbeatTimeout = 150 * time.Millisecond
 	rf.resetElectionTimer()
 	// Your initialization code here (3A, 3B, 3C).
 	rf.state = FOLLOWER

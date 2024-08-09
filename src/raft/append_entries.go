@@ -1,12 +1,10 @@
 package raft
 
-import "fmt"
-
 // Source: https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf, Figure 2
 
 type AppendEntriesArgs struct {
+	BaseRPC              // leader's term
 	LeaderId     int     // so follower can redirect clients
-	Term         int     // leader's term
 	PrevLogIndex int     // index of log entry immediately preceding new ones
 	PrevLogTerm  int     // term of prevLogIndex entry
 	Entries      []Entry // log entries to store (empty for heartbeat; may send more than one for efficiency)
@@ -14,7 +12,7 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term          int  // currentTerm, for leader to update itself
+	BaseRPC            // currentTerm, for leader to update itself
 	Success       bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 	ConflictIndex int  // the index of the first conflicting entry
 }
@@ -30,11 +28,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = false
 	reply.ConflictIndex = -1
-	reply.Term = rf.currentTerm
 
-	// If RPC request or response contains term T > currentTerm:
-	// set currentTerm = T, convert to follower (§5.1)
-	if !rf.isCallerTermValid(args.Term) {
+	if !rf.checkRequestTerm(args, reply) {
 		return
 	}
 
@@ -92,20 +87,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
-	reply := AppendEntriesReply{}
-	DPrintf("(AppendEntries) [%d] send to %d, Term: %d, PrevLogIndex: %d, PrevLogTerm: %d\n", rf.me, server, args.Term, args.PrevLogIndex, args.PrevLogTerm)
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
-
+	reply := &AppendEntriesReply{}
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok {
 		return
 	}
+
 	DPrintf("(AppendEntries) [%d] recieve reply from %d, Term: %d, Success: %v, ConflictIndex: %d\n", rf.me, server, reply.Term, reply.Success, reply.ConflictIndex)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	// The term is outdated, do not reset the election timer
-	if rf.isReplyTermGreater(reply.Term) {
+	if !rf.checkResponseTerm(reply) {
 		return
 	}
 
@@ -160,16 +154,12 @@ func (rf *Raft) prepareAppendEntries(peer int, isAsync bool) {
 	nextIndex := rf.nextIndex[peer]
 	if nextIndex > firstLog.Index {
 		nextIndex -= firstLog.Index
-		if nextIndex > len(rf.logs) {
-			fmt.Printf("Server %d nextIndex %d >= len(rf.logs) %d\n", rf.me, nextIndex, len(rf.logs))
-			nextIndex = len(rf.logs)
-		}
 		prevLog := rf.logs[nextIndex-1]
 		logs := make([]Entry, len(rf.logs[nextIndex:]))
 		copy(logs, rf.logs[nextIndex:])
 		args := AppendEntriesArgs{
+			BaseRPC:      BaseRPC{rf.currentTerm},
 			LeaderId:     rf.me,
-			Term:         rf.currentTerm,
 			PrevLogIndex: prevLog.Index,
 			PrevLogTerm:  prevLog.Term,
 			Entries:      logs,
@@ -183,7 +173,7 @@ func (rf *Raft) prepareAppendEntries(peer int, isAsync bool) {
 		}
 	} else {
 		args := &InstallSnapshotArgs{
-			Term:              rf.currentTerm,
+			BaseRPC:           BaseRPC{rf.currentTerm},
 			LeaderId:          rf.me,
 			LastIncludedIndex: rf.logs[0].Index,
 			LastIncludedTerm:  rf.logs[0].Term,

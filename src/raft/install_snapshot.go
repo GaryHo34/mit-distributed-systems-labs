@@ -1,7 +1,7 @@
 package raft
 
 type InstallSnapshotArgs struct {
-	Term              int
+	BaseRPC
 	LeaderId          int
 	LastIncludedIndex int
 	LastIncludedTerm  int
@@ -11,16 +11,15 @@ type InstallSnapshotArgs struct {
 }
 
 type InstallSnapshotReply struct {
-	Term int
+	BaseRPC
 }
 
 // InstallSnapshot RPC handler
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	reply.Term = rf.currentTerm
 
-	if !rf.isCallerTermValid(args.Term) {
+	if !rf.checkRequestTerm(args, reply) {
 		return
 	}
 
@@ -71,8 +70,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) {
-	reply := InstallSnapshotReply{}
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, &reply)
+	reply := &InstallSnapshotReply{}
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	if !ok {
 		return
 	}
@@ -80,7 +79,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.isReplyTermGreater(reply.Term) {
+	if !rf.checkResponseTerm(reply) {
 		return
 	}
 

@@ -9,14 +9,14 @@ import (
 // Source: https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf, Figure 2
 
 type RequestVoteArgs struct {
-	Term         int // candidate's term
+	BaseRPC          // candidate's term
 	CandidateId  int // candidate requesting vote
 	LastLogIndex int // index of candidate's last log entry
 	LastLogTerm  int // term of candidate's last log entry
 }
 
 type RequestVoteReply struct {
-	Term        int  // currentTerm, for candidate to update itself
+	BaseRPC          // currentTerm, for candidate to update itself
 	VoteGranted bool // true means candidate received vote
 }
 
@@ -28,12 +28,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.persist()
 
 	reply.VoteGranted = false
-	reply.Term = rf.currentTerm
 
-	// Reply false if term < currentTerm (§5.1)
-	// If RPC request or response contains term T > currentTerm:
-	// set currentTerm = T, convert to follower (§5.1)
-	if !rf.isCallerTermValid(args.Term) {
+	DPrintf("(RequestVote) [%d]: receive vote request from %d, term %d\n", rf.me, args.CandidateId, args.Term)
+
+	if !rf.checkRequestTerm(args, reply) {
 		return
 	}
 
@@ -52,8 +50,8 @@ func (rf *Raft) isUpToDate(args *RequestVoteArgs) bool {
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *int32) {
-	reply := RequestVoteReply{}
-	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
+	reply := &RequestVoteReply{}
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if !ok {
 		return
 	}
@@ -62,17 +60,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	if rf.isReplyTermGreater(reply.Term) {
+	if !rf.checkResponseTerm(reply) {
 		return
 	}
 
 	if !reply.VoteGranted {
-		DPrintf("[%d]: not received vote from %d\n", rf.me, server)
 		return
 	}
 
-	DPrintf("[%d]: received vote from %d\n", rf.me, server)
+	DPrintf("(RequestVote) [%d]: received vote from %d, voteCount: %d\n", rf.me, server, *voteCount)
 
+	// If votes received from majority of servers: become leader
 	if atomic.AddInt32(voteCount, 1) > int32(len(rf.peers)/2) &&
 		rf.state == CANDIDATE &&
 		rf.currentTerm == args.Term {
@@ -95,12 +93,12 @@ func (rf *Raft) startElection() {
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
 	rf.resetElectionTimer()
-	DPrintf("[%d]: start election, term %d", rf.me, rf.currentTerm)
+	DPrintf("(RequestVote) [%d]: start election, term %d", rf.me, rf.currentTerm)
 	lastLog := rf.logs[len(rf.logs)-1]
 
 	voteCount := int32(1)
 	args := RequestVoteArgs{
-		Term:         rf.currentTerm,
+		BaseRPC:      BaseRPC{rf.currentTerm},
 		CandidateId:  rf.me,
 		LastLogIndex: lastLog.Index,
 		LastLogTerm:  lastLog.Term,
@@ -115,16 +113,14 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) resetElectionTimer() {
-	rf.elecmu.Lock()
-	defer rf.elecmu.Unlock()
-	// Choose from 150 to 300
-	ms := 150 + (rand.Int63() % 150)
+	// election timeout range from 250 to 500
+	ms := 250 + (rand.Int63() % 250)
 	rf.electionTimeStamp = time.Now()
 	rf.electionTimeout = time.Duration(ms) * time.Millisecond
 }
 
 func (rf *Raft) isElectionTimeout() bool {
-	rf.elecmu.Lock()
-	defer rf.elecmu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return time.Now().After(rf.electionTimeStamp.Add(rf.electionTimeout))
 }
