@@ -28,7 +28,6 @@ type Op struct {
 	Value    string
 	ClientId int64
 	Seq      int
-	Chanid   int64
 }
 
 type Done struct {
@@ -44,23 +43,13 @@ type Cache struct {
 	Err   Err
 }
 
-func (kv *KVServer) newChan() int64 {
-	id := nrand()
-	for _, exist := kv.chanmap.Load(id); exist; _, exist = kv.chanmap.Load(id) {
-		id = nrand()
-	}
-	kv.chanmap.Store(id, make(chan Done))
-	return id
-}
-
-func NewOp(op Opc, key, value string, clientId int64, seq int, chanid int64) Op {
+func NewOp(op Opc, key, value string, clientId int64, seq int) Op {
 	return Op{
 		Op:       op,
 		Key:      key,
 		Value:    value,
 		ClientId: clientId,
 		Seq:      seq,
-		Chanid:   chanid,
 	}
 }
 
@@ -76,40 +65,31 @@ type KVServer struct {
 
 	data    map[string]string
 	cache   map[int64]*Cache // client id -> seq
-	chanmap sync.Map
+	chanmap map[int64]chan Done
 }
 
-func (kv *KVServer) closeAndDeleteChan(chanid int64) {
-	ach, _ := kv.chanmap.Load(chanid)
-	ch := ach.(chan Done)
-	close(ch)
-	kv.chanmap.Delete(chanid)
-}
-
-func (kv *KVServer) waitForDone(chanid int64, index, term int) (v string, e Err) {
-	ach, _ := kv.chanmap.Load(chanid)
-	ch := ach.(chan Done)
-	timer := time.NewTimer(3 * time.Second)
-	select {
-	case <-timer.C:
-		v = ""
-		e = ErrWrongLeader
-	case done := <-ch:
-		if done.index != index || done.term != term {
-			v = ""
-			e = ErrWrongLeader
-		} else {
-			v = done.value
-			e = done.err
-		}
-	}
-	kv.closeAndDeleteChan(chanid)
+func getChanId(term, index int) (id int64) {
+	id = int64(term) << 32
+	id += int64(index)
 	return
 }
 
-func (kv *KVServer) isCacheHit(clientId int64, seqNum int) (bool, string, Err) {
+func (kv *KVServer) makeChan(term, index int) chan Done {
+	id := getChanId(term, index)
+	ch := make(chan Done, 1)
+	kv.chanmap[id] = ch
+	return ch
+}
+
+func (kv *KVServer) closeAndDeleteChan(term, index int) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	id := getChanId(term, index)
+	close(kv.chanmap[id])
+	delete(kv.chanmap, id)
+}
+
+func (kv *KVServer) isCacheHit(clientId int64, seqNum int) (bool, string, Err) {
 	ca, ok := kv.cache[clientId]
 	if ok && ca.Seq >= seqNum {
 		return true, ca.Value, ca.Err
@@ -141,49 +121,55 @@ func (kv *KVServer) decode(buf []byte) {
 	kv.data = data
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	k, clientId, seqNum := args.Key, args.ClientId, args.SeqNum
-	// If we can find a seq greater or equal to seqNum in the cache,
-	// it means the raft log has already been executed.
-	// We can return the value directly.
-	if hit, v, e := kv.isCacheHit(clientId, seqNum); hit {
-		reply.Value = v
-		reply.Err = e
+func (kv *KVServer) startRaft(k, v string, op Opc, cid int64, seq int, ch chan GetReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if hit, vv, e := kv.isCacheHit(cid, seq); hit {
+		ch <- GetReply{vv, e}
 		return
 	}
-	chanid := kv.newChan()
-	index, term, isLeader := kv.rf.Start(NewOp(GET, k, "", clientId, seqNum, chanid))
+	DPrintf("(startRaft) [%d] start raft, op: %v, key: %s, value: %s, cid: %d, seq: %d\n", kv.me, op, k, v, cid, seq)
+	index, term, isLeader := kv.rf.Start(NewOp(op, k, v, cid, seq))
 	if !isLeader {
-		kv.closeAndDeleteChan(chanid)
-		reply.Err = ErrWrongLeader
+		ch <- GetReply{"", ErrWrongLeader}
 		return
 	}
-	value, err := kv.waitForDone(chanid, index, term)
-	reply.Value = value
-	reply.Err = err
+	donech := kv.makeChan(term, index)
+	go kv.waitRaft(term, index, ch, donech)
+}
+
+func (kv *KVServer) waitRaft(term, index int, ch chan GetReply, donech chan Done) {
+	timer := time.NewTimer(500 * time.Millisecond)
+	DPrintf("(startRaft) [%d] wait for term: %d, index: %d\n", kv.me, term, index)
+	select {
+	case <-timer.C:
+		DPrintf("(startRaft) [%d] timeout, term: %d, index: %d\n", kv.me, term, index)
+		ch <- GetReply{"", ErrWrongLeader}
+	case done := <-donech:
+		ch <- GetReply{done.value, done.err}
+	}
+	kv.closeAndDeleteChan(term, index)
+}
+
+func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	ch := make(chan GetReply)
+	go kv.startRaft(args.Key, "", GET, args.ClientId, args.SeqNum, ch)
+	r := <-ch
+	reply.Value = r.Value
+	reply.Err = r.Err
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	var code Opc
+	var op Opc
 	if args.Op == "Put" {
-		code = PUT
+		op = PUT
 	} else {
-		code = APPEND
+		op = APPEND
 	}
-	k, v, clientId, seqNum := args.Key, args.Value, args.ClientId, args.SeqNum
-	if hit, _, e := kv.isCacheHit(clientId, seqNum); hit {
-		reply.Err = e
-		return
-	}
-	chanid := kv.newChan()
-	index, term, isLeader := kv.rf.Start(NewOp(code, k, v, clientId, seqNum, chanid))
-	if !isLeader {
-		kv.closeAndDeleteChan(chanid)
-		reply.Err = ErrWrongLeader
-		return
-	}
-	_, err := kv.waitForDone(chanid, index, term)
-	reply.Err = err
+	ch := make(chan GetReply)
+	go kv.startRaft(args.Key, args.Value, op, args.ClientId, args.SeqNum, ch)
+	r := <-ch
+	reply.Err = r.Err
 }
 
 // Serializes the execution of operations on the key-value store.
@@ -191,22 +177,20 @@ func (kv *KVServer) executor() {
 	for !kv.killed() {
 		var index, term int
 		msg := <-kv.applyCh
+		DPrintf("(executor) [%d] receive msg %+v\n", kv.me, msg)
+		kv.mu.Lock()
 		if msg.CommandValid {
-			if msg.Command == nil {
-				log.Panicf("Invalid applyMsg %+v\n", msg)
-				continue
-			}
 			index, term = msg.CommandIndex, msg.CommandTerm
 			op := msg.Command.(Op)
-			code, k, v, clientId, seq, chanid := op.Op, op.Key, op.Value, op.ClientId, op.Seq, op.Chanid
+			code, k, v, clientId, seq := op.Op, op.Key, op.Value, op.ClientId, op.Seq
 			var err Err
 			if hit, pv, pe := kv.isCacheHit(clientId, seq); hit {
 				err = pe
 				v = pv
 			} else {
-				kv.mu.Lock()
 				switch code {
 				case GET:
+					DPrintf("(executor) [%d] get %s: %s\n", kv.me, k, kv.data[k])
 					tv, ok := kv.data[k]
 					if !ok {
 						v = ""
@@ -216,10 +200,12 @@ func (kv *KVServer) executor() {
 						err = OK
 					}
 				case PUT:
+					DPrintf("(executor) [%d] put %s: %s\n", kv.me, k, v)
 					kv.data[k] = v
 					err = OK
 				case APPEND:
 					kv.data[k] += v
+					DPrintf("(executor) [%d] append %s: %s\n", kv.me, k, kv.data[k])
 					err = OK
 				}
 				if _, ok := kv.cache[clientId]; !ok {
@@ -231,22 +217,19 @@ func (kv *KVServer) executor() {
 				if kv.maxraftstate != -1 && kv.maxraftstate < kv.ps.RaftStateSize() {
 					kv.rf.Snapshot(index, kv.encode())
 				}
-				kv.mu.Unlock()
 			}
-			if ch, ok := kv.chanmap.Load(chanid); ok {
-				ch := ch.(chan Done)
+			if ch, ok := kv.chanmap[getChanId(term, index)]; ok {
 				select {
 				case ch <- Done{index, term, v, err}:
 				default:
 				}
 			}
 		} else if msg.SnapshotValid {
-			kv.mu.Lock()
 			kv.decode(msg.Snapshot)
-			kv.mu.Unlock()
 		} else {
 			log.Fatalf("Invalid applyMsg, %+v\n", msg)
 		}
+		kv.mu.Unlock()
 	}
 }
 
@@ -295,6 +278,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.ps = persister
 	kv.data = make(map[string]string)
 	kv.cache = make(map[int64]*Cache)
+	kv.chanmap = make(map[int64]chan Done)
 
 	// Read from persister if any
 	kv.decode(kv.ps.ReadSnapshot())

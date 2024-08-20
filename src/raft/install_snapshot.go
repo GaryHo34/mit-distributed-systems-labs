@@ -59,7 +59,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.logs[0].Command = nil
 	}
 	rf.persister.Save(rf.encodeState(), args.Data)
-	rf.applyCh <- ApplyMsg{
+	rf.smsg = &ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
 		SnapshotTerm:  args.LastIncludedTerm,
@@ -77,11 +77,11 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if !rf.checkResponseTerm(reply) {
+	if !rf.checkResponseTerm(args, reply, false) {
 		return
 	}
 
-	if rf.currentTerm != args.Term || rf.state != LEADER || args.LastIncludedIndex != rf.logs[0].Index {
+	if args.LastIncludedIndex != rf.logs[0].Index {
 		return
 	}
 

@@ -42,6 +42,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	prevLogIndex := args.PrevLogIndex - rf.logs[0].Index
 
 	if prevLogIndex < 0 {
+		// force to send a snapshot
 		reply.ConflictIndex = 0
 		return
 	}
@@ -49,6 +50,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if prevLogIndex >= len(rf.logs) {
+		reply.ConflictIndex = rf.logs[len(rf.logs)-1].Index
 		return
 	}
 
@@ -99,10 +101,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	if !rf.checkResponseTerm(reply) {
+	if !rf.checkResponseTerm(args, reply, false) {
 		return
 	}
-
 	// If successful: update nextIndex and matchIndex for
 	// follower (§5.3)
 	if reply.Success {
@@ -126,7 +127,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 			}
 		}
 	} else {
-		rf.nextIndex[server] = reply.ConflictIndex - 1
+		if reply.ConflictIndex != -1 {
+			rf.nextIndex[server] = reply.ConflictIndex - 1
+		} else {
+			rf.nextIndex[server] = rf.nextIndex[server] - 1
+		}
 		if rf.nextIndex[server] < 1 {
 			rf.nextIndex[server] = 1
 		}
@@ -137,27 +142,26 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 
 func (rf *Raft) broadcastAppendEntries(isHeartBeat bool) {
 	for peer := range rf.peers {
-		if peer == rf.me {
-			continue
-		}
-		if isHeartBeat {
-			rf.prepareAppendEntries(peer, true)
-		} else {
-			rf.broadcasterCond[peer].Signal()
+		if peer != rf.me {
+			// if it is a heartbeat we dont care the linearizability of logs append
+			if isHeartBeat {
+				args := rf.prepareReplicationArgs(peer)
+				go rf.sendReplicationRPC(peer, args)
+			} else {
+				rf.broadcasterCond[peer].Signal()
+			}
 		}
 	}
 }
 
-func (rf *Raft) prepareAppendEntries(peer int, isAsync bool) {
-	rf.mu.Lock()
-	firstLog := rf.logs[0]
-	nextIndex := rf.nextIndex[peer]
-	if nextIndex > firstLog.Index {
-		nextIndex -= firstLog.Index
+func (rf *Raft) prepareReplicationArgs(peer int) interface{} {
+	if rf.nextIndex[peer] > rf.logs[0].Index {
+		firstLog := rf.logs[0]
+		nextIndex := rf.nextIndex[peer] - firstLog.Index
 		prevLog := rf.logs[nextIndex-1]
 		logs := make([]Entry, len(rf.logs[nextIndex:]))
 		copy(logs, rf.logs[nextIndex:])
-		args := AppendEntriesArgs{
+		return &AppendEntriesArgs{
 			BaseRPC:      BaseRPC{rf.currentTerm},
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLog.Index,
@@ -165,14 +169,8 @@ func (rf *Raft) prepareAppendEntries(peer int, isAsync bool) {
 			Entries:      logs,
 			CommitIndex:  rf.commitIndex,
 		}
-		rf.mu.Unlock()
-		if isAsync {
-			go rf.sendAppendEntries(peer, &args)
-		} else {
-			rf.sendAppendEntries(peer, &args)
-		}
 	} else {
-		args := &InstallSnapshotArgs{
+		return &InstallSnapshotArgs{
 			BaseRPC:           BaseRPC{rf.currentTerm},
 			LeaderId:          rf.me,
 			LastIncludedIndex: rf.logs[0].Index,
@@ -181,11 +179,36 @@ func (rf *Raft) prepareAppendEntries(peer int, isAsync bool) {
 			Data:              rf.persister.ReadSnapshot(),
 			Done:              true,
 		}
-		rf.mu.Unlock()
-		if isAsync {
-			go rf.sendInstallSnapshot(peer, args)
-		} else {
-			rf.sendInstallSnapshot(peer, args)
+	}
+}
+
+func (rf *Raft) sendReplicationRPC(peer int, args interface{}) {
+	switch v := args.(type) {
+	case *AppendEntriesArgs:
+		rf.sendAppendEntries(peer, v)
+	case *InstallSnapshotArgs:
+		rf.sendInstallSnapshot(peer, v)
+	default:
+		panic("(sendReplicationRPC) SHOULD NOT REACH")
+	}
+}
+
+func (rf *Raft) isReplicationNeeded(peer int) bool {
+	return rf.state == LEADER && rf.matchIndex[peer] < rf.logs[len(rf.logs)-1].Index
+}
+
+func (rf *Raft) broadcaster(peer int) {
+	rf.broadcasterCond[peer].L.Lock()
+	defer rf.broadcasterCond[peer].L.Unlock()
+	for !rf.killed() {
+		rf.mu.Lock()
+		for !rf.isReplicationNeeded(peer) {
+			rf.mu.Unlock()
+			rf.broadcasterCond[peer].Wait()
+			rf.mu.Lock()
 		}
+		args := rf.prepareReplicationArgs(peer)
+		rf.mu.Unlock()
+		rf.sendReplicationRPC(peer, args)
 	}
 }

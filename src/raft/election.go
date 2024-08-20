@@ -60,7 +60,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	if !rf.checkResponseTerm(reply) {
+	if !rf.checkResponseTerm(args, reply, true) {
 		return
 	}
 
@@ -81,14 +81,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteCount *in
 			rf.matchIndex[i] = 0
 		}
 		DPrintf("[%d]: become leader to term %d\n", rf.me, rf.currentTerm)
-		go rf.broadcastAppendEntries(true)
+		// send initial empty AppendEntries RPCs (heartbeat) to each server immediately
+		rf.broadcastAppendEntries(true)
 	}
+	DPrintf("(RequestVote) [%d]: voteCount: %d\n", rf.me, *voteCount)
 }
 
 func (rf *Raft) startElection() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	rf.currentTerm++
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
@@ -113,14 +112,12 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) resetElectionTimer() {
-	// election timeout range from 250 to 500
-	ms := 250 + (rand.Int63() % 250)
+	// election timeout range from 350 to 550
+	ms := 350 + (rand.Int63() % 200)
 	rf.electionTimeStamp = time.Now()
 	rf.electionTimeout = time.Duration(ms) * time.Millisecond
 }
 
 func (rf *Raft) isElectionTimeout() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	return time.Now().After(rf.electionTimeStamp.Add(rf.electionTimeout))
 }

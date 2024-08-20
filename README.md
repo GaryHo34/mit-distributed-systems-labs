@@ -1,6 +1,6 @@
 # Introduction
 
-My implementations for Labs 1-4 of MIT 6.5840 Distributed Systems course.
+Implementations for Labs 1-4 of MIT 6.5840 Distributed Systems course, passed provided tests >500 times.
 
 For more information about the course, please visit the [MIT Course Page](https://pdos.csail.mit.edu/6.824/general.html).
 

@@ -118,6 +118,9 @@ type Raft struct {
 	// volatile state on leaders (reinitialized after election)
 	nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+
+	// snapshot msg
+	smsg *ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -251,14 +254,15 @@ func (rf *Raft) checkRequestTerm(args, reply RaftRPC) bool {
 
 // If RPC request or response contains term T > currentTerm:
 // set currentTerm = T, convert to follower (§5.1)
-func (rf *Raft) checkResponseTerm(reply RaftRPC) bool {
-	term := reply.GetTerm()
-	if term > rf.currentTerm {
-		rf.resetNewTermState(term)
+func (rf *Raft) checkResponseTerm(args, reply RaftRPC, isElection bool) bool {
+	argsTerm := args.GetTerm()
+	replyTerm := reply.GetTerm()
+	if replyTerm > argsTerm {
+		rf.resetNewTermState(replyTerm)
 		rf.resetElectionTimer()
 		return false
 	}
-	return true
+	return isElection || (rf.state == LEADER)
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -280,23 +284,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) isReplicationNeeded(peer int) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.state == LEADER && rf.matchIndex[peer] < rf.logs[len(rf.logs)-1].Index
-}
-
-func (rf *Raft) broadcaster(peer int) {
-	rf.broadcasterCond[peer].L.Lock()
-	defer rf.broadcasterCond[peer].L.Unlock()
-	for !rf.killed() {
-		for !rf.isReplicationNeeded(peer) {
-			rf.broadcasterCond[peer].Wait()
-		}
-		rf.prepareAppendEntries(peer, false)
-	}
-}
-
 // a dedicated applier goroutine to guarantee that each log will be push into applyCh exactly once, ensuring that service's applying entries and raft's committing entries can be parallel
 func (rf *Raft) applier() {
 	for !rf.killed() {
@@ -310,7 +297,14 @@ func (rf *Raft) applier() {
 		DPrintf("(applier) [%d]: commitIndex: %d, lastApplied: %d, logFirstIndex: %d, logLastIndex: %d\n", rf.me, commitIndex, lastApplied, firstLogIndex, rf.logs[len(rf.logs)-1].Index)
 		entries := make([]Entry, commitIndex-lastApplied)
 		copy(entries, rf.logs[lastApplied+1-firstLogIndex:commitIndex+1-firstLogIndex])
-		rf.mu.Unlock()
+		if rf.smsg != nil {
+			msg := rf.smsg
+			rf.smsg = nil
+			rf.mu.Unlock()
+			rf.applyCh <- *msg
+		} else {
+			rf.mu.Unlock()
+		}
 		for _, entry := range entries {
 			DPrintf("(applier) [%d]: apply entry %+v\n", rf.me, entry)
 			rf.applyCh <- ApplyMsg{
@@ -355,20 +349,14 @@ func (rf *Raft) applier() {
  */
 func (rf *Raft) ticker() {
 	for !rf.killed() {
-		// Your code here (3A)
-		// Check if a leader election should be started.
-		time.Sleep(rf.heartbeatTimeout)
-
-		_, isLeader := rf.GetState()
-
-		if isLeader {
+		rf.mu.Lock()
+		if rf.state == LEADER {
 			rf.broadcastAppendEntries(true)
-			continue
 		} else if rf.isElectionTimeout() {
 			rf.startElection()
 		}
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
+		rf.mu.Unlock()
+		time.Sleep(rf.heartbeatTimeout)
 	}
 }
 
@@ -388,30 +376,33 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
-	rf.heartbeatTimeout = 150 * time.Millisecond
+	rf.heartbeatTimeout = 125 * time.Millisecond
 	rf.resetElectionTimer()
-	// Your initialization code here (3A, 3B, 3C).
 	rf.state = FOLLOWER
 	rf.votedFor = -1
 	rf.logs = make([]Entry, 0)
 
 	// dummy entry to make the index start from 1
-	rf.logs = append(rf.logs, Entry{})
+	rf.logs = append(rf.logs, Entry{0, 0, nil})
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+
 	rf.applierCond = sync.NewCond(&rf.mu)
 	rf.broadcasterCond = make([]*sync.Cond, len(peers))
+
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	lastLog := rf.logs[len(rf.logs)-1]
+
 	for id := range peers {
-		rf.nextIndex[id], rf.matchIndex[id] = lastLog.Index+1, 0
+		rf.nextIndex[id] = 1
 		if id != rf.me {
 			rf.broadcasterCond[id] = sync.NewCond(&sync.Mutex{})
 			go rf.broadcaster(id)
 		}
 	}
+
+	rf.smsg = nil
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -1,8 +1,8 @@
 package kvraft
 
 import (
-	"crypto/rand"
-	"math/big"
+	"sync/atomic"
+	"time"
 
 	"6.5840/labrpc"
 )
@@ -13,13 +13,7 @@ type Clerk struct {
 	servers  []*labrpc.ClientEnd
 	clientId int64
 	seqNum   int
-}
-
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
+	leader   int32 // cache the leader
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
@@ -48,14 +42,18 @@ func (ck *Clerk) Get(key string) string {
 		ClientId: ck.clientId,
 		SeqNum:   ck.seqNum,
 	}
+	leader := int(atomic.LoadInt32(&ck.leader))
 	for {
-		for _, server := range ck.servers {
+		for i := 0; i < len(ck.servers); i++ {
+			peer := (leader + i) % len(ck.servers)
 			reply := GetReply{}
-			ok := server.Call("KVServer.Get", &args, &reply)
+			ok := ck.servers[peer].Call("KVServer.Get", &args, &reply)
 			if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+				atomic.StoreInt32(&ck.leader, int32(peer))
 				return reply.Value
 			}
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -76,14 +74,18 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ClientId: ck.clientId,
 		SeqNum:   ck.seqNum,
 	}
+	leader := int(atomic.LoadInt32(&ck.leader))
 	for {
-		for _, server := range ck.servers {
+		for i := 0; i < len(ck.servers); i++ {
+			peer := (leader + i) % len(ck.servers)
 			reply := PutAppendReply{}
-			ok := server.Call("KVServer.PutAppend", &args, &reply)
+			ok := ck.servers[peer].Call("KVServer.PutAppend", &args, &reply)
 			if ok && reply.Err == OK {
+				atomic.StoreInt32(&ck.leader, int32(peer))
 				return
 			}
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

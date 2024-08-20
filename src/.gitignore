@@ -10,3 +10,6 @@ mrtmp.*
 /main/mrcoordinator
 /main/mrsequential
 /main/mrworker
+test.sh
+tester
+test-*.log
