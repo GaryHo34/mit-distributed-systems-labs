@@ -6,36 +6,36 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 )
 
-type Opc int
-
-const (
-	GET Opc = iota
-	PUT
-	APPEND
-)
+type ClientInfo struct {
+	ClientId int64
+	SeqNum   int
+}
 
 type Err string
 
+type GetArgs struct {
+	Key string
+	ClientInfo
+}
+
+type GetReply struct {
+	Value string
+	Err   Err
+}
+
 // Put or Append
 type PutAppendArgs struct {
-	Key      string
-	Value    string
-	Op       string // "Put" or "Append"
-	ClientId int64
-	SeqNum   int
+	OpStr string // "Put" or "Append"
+	Key   string
+	Value string
+	ClientInfo
 }
 
 type PutAppendReply struct {
 	Err Err
 }
 
-type GetArgs struct {
-	Key      string
-	ClientId int64
-	SeqNum   int
-}
-
-type GetReply struct {
-	Value string
-	Err   Err
+type RaftReply struct {
+	ClientInfo
+	GetReply
 }

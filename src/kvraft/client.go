@@ -37,11 +37,12 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 	ck.seqNum++
-	args := GetArgs{
-		Key:      key,
-		ClientId: ck.clientId,
-		SeqNum:   ck.seqNum,
-	}
+
+	args := GetArgs{}
+	args.Key = key
+	args.ClientId = ck.clientId
+	args.SeqNum = ck.seqNum
+
 	leader := int(atomic.LoadInt32(&ck.leader))
 	for {
 		for i := 0; i < len(ck.servers); i++ {
@@ -67,13 +68,14 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.seqNum++
-	args := PutAppendArgs{
-		Op:       op,
-		Key:      key,
-		Value:    value,
-		ClientId: ck.clientId,
-		SeqNum:   ck.seqNum,
-	}
+
+	args := PutAppendArgs{}
+	args.OpStr = op
+	args.Key = key
+	args.Value = value
+	args.ClientId = ck.clientId
+	args.SeqNum = ck.seqNum
+
 	leader := int(atomic.LoadInt32(&ck.leader))
 	for {
 		for i := 0; i < len(ck.servers); i++ {

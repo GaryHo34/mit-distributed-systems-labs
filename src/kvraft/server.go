@@ -22,12 +22,19 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type Opcode int
+
+const (
+	GET Opcode = iota
+	PUT
+	APPEND
+)
+
 type Op struct {
-	Op       Opc
-	Key      string
-	Value    string
-	ClientId int64
-	Seq      int
+	Op    Opcode
+	Key   string
+	Value string
+	ClientInfo
 }
 
 type Done struct {
@@ -37,20 +44,8 @@ type Done struct {
 	err   Err
 }
 
-type Cache struct {
-	Seq   int
-	Value string
-	Err   Err
-}
-
-func NewOp(op Opc, key, value string, clientId int64, seq int) Op {
-	return Op{
-		Op:       op,
-		Key:      key,
-		Value:    value,
-		ClientId: clientId,
-		Seq:      seq,
-	}
+func NewOp(op Opcode, key, value string, clientId int64, seq int) Op {
+	return Op{op, key, value, ClientInfo{clientId, seq}}
 }
 
 type KVServer struct {
@@ -64,7 +59,7 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	data    map[string]string
-	cache   map[int64]*Cache // client id -> seq
+	cache   map[int64]*RaftReply // client id -> seq
 	chanmap map[int64]chan Done
 }
 
@@ -89,12 +84,21 @@ func (kv *KVServer) closeAndDeleteChan(term, index int) {
 	delete(kv.chanmap, id)
 }
 
-func (kv *KVServer) isCacheHit(clientId int64, seqNum int) (bool, string, Err) {
-	ca, ok := kv.cache[clientId]
-	if ok && ca.Seq >= seqNum {
-		return true, ca.Value, ca.Err
+func (kv *KVServer) isCacheHit(clientId int64, seqNum int) (bool, *RaftReply) {
+	// Why cache.SeqNum >= seqNum works?
+	// 1. If the seq of cache equals to seqNum, it means the operation has been
+	//    executed. Return the value directly.
+	// 2. If the seq of cache is Greater than seqNum, it means some operations
+	//    after this Op have been executed, which implies client has already
+	//    received the result of this Op (the operation must be completed before
+	//	  next operation happened). Theorically, return anything is OK.
+	if cache, ok := kv.cache[clientId]; ok && cache.SeqNum >= seqNum {
+		return true, cache
 	}
-	return false, "", ErrWrongLeader
+	rr := new(RaftReply)
+	rr.Value = ""
+	rr.Err = ErrWrongLeader
+	return false, rr
 }
 
 func (kv *KVServer) encode() []byte {
@@ -111,7 +115,7 @@ func (kv *KVServer) decode(buf []byte) {
 	}
 	r := bytes.NewBuffer(buf)
 	d := labgob.NewDecoder(r)
-	var cache map[int64]*Cache
+	var cache map[int64]*RaftReply
 	var data map[string]string
 	if d.Decode(&cache) != nil || d.Decode(&data) != nil {
 		log.Fatal("Decode error")
@@ -121,38 +125,46 @@ func (kv *KVServer) decode(buf []byte) {
 	kv.data = data
 }
 
-func (kv *KVServer) startRaft(k, v string, op Opc, cid int64, seq int, ch chan GetReply) {
+func (kv *KVServer) startRaft(k, v string, op Opcode, cid int64, seq int, ch chan *RaftReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if hit, vv, e := kv.isCacheHit(cid, seq); hit {
-		ch <- GetReply{vv, e}
+	if hit, cache := kv.isCacheHit(cid, seq); hit {
+		ch <- cache
 		return
 	}
 	DPrintf("(startRaft) [%d] start raft, op: %v, key: %s, value: %s, cid: %d, seq: %d\n", kv.me, op, k, v, cid, seq)
 	index, term, isLeader := kv.rf.Start(NewOp(op, k, v, cid, seq))
 	if !isLeader {
-		ch <- GetReply{"", ErrWrongLeader}
+		rr := new(RaftReply)
+		rr.Value = ""
+		rr.Err = ErrWrongLeader
+		ch <- rr
 		return
 	}
 	donech := kv.makeChan(term, index)
 	go kv.waitRaft(term, index, ch, donech)
 }
 
-func (kv *KVServer) waitRaft(term, index int, ch chan GetReply, donech chan Done) {
+func (kv *KVServer) waitRaft(term, index int, ch chan *RaftReply, donech chan Done) {
 	timer := time.NewTimer(500 * time.Millisecond)
+	rr := new(RaftReply)
 	DPrintf("(startRaft) [%d] wait for term: %d, index: %d\n", kv.me, term, index)
 	select {
 	case <-timer.C:
 		DPrintf("(startRaft) [%d] timeout, term: %d, index: %d\n", kv.me, term, index)
-		ch <- GetReply{"", ErrWrongLeader}
+		rr.Value = ""
+		rr.Err = ErrWrongLeader
+		ch <- rr
 	case done := <-donech:
-		ch <- GetReply{done.value, done.err}
+		rr.Value = done.value
+		rr.Err = done.err
+		ch <- rr
 	}
 	kv.closeAndDeleteChan(term, index)
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	ch := make(chan GetReply)
+	ch := make(chan *RaftReply)
 	go kv.startRaft(args.Key, "", GET, args.ClientId, args.SeqNum, ch)
 	r := <-ch
 	reply.Value = r.Value
@@ -160,13 +172,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	var op Opc
-	if args.Op == "Put" {
+	var op Opcode
+	if args.OpStr == "Put" {
 		op = PUT
 	} else {
 		op = APPEND
 	}
-	ch := make(chan GetReply)
+	ch := make(chan *RaftReply)
 	go kv.startRaft(args.Key, args.Value, op, args.ClientId, args.SeqNum, ch)
 	r := <-ch
 	reply.Err = r.Err
@@ -182,37 +194,36 @@ func (kv *KVServer) executor() {
 		if msg.CommandValid {
 			index, term = msg.CommandIndex, msg.CommandTerm
 			op := msg.Command.(Op)
-			code, k, v, clientId, seq := op.Op, op.Key, op.Value, op.ClientId, op.Seq
+			code, key, value, clientId, seq := op.Op, op.Key, op.Value, op.ClientId, op.SeqNum
 			var err Err
-			if hit, pv, pe := kv.isCacheHit(clientId, seq); hit {
-				err = pe
-				v = pv
+			if hit, cache := kv.isCacheHit(clientId, seq); hit {
+				err = cache.Err
+				value = cache.Value
 			} else {
 				switch code {
 				case GET:
-					DPrintf("(executor) [%d] get %s: %s\n", kv.me, k, kv.data[k])
-					tv, ok := kv.data[k]
-					if !ok {
-						v = ""
-						err = ErrNoKey
-					} else {
-						v = tv
+					DPrintf("(executor) [%d] get %s: %s\n", kv.me, key, kv.data[key])
+					if val, ok := kv.data[key]; ok {
+						value = val
 						err = OK
+					} else {
+						value = ""
+						err = ErrNoKey
 					}
 				case PUT:
-					DPrintf("(executor) [%d] put %s: %s\n", kv.me, k, v)
-					kv.data[k] = v
+					DPrintf("(executor) [%d] put %s: %s\n", kv.me, key, value)
+					kv.data[key] = value
 					err = OK
 				case APPEND:
-					kv.data[k] += v
-					DPrintf("(executor) [%d] append %s: %s\n", kv.me, k, kv.data[k])
+					kv.data[key] += value
+					DPrintf("(executor) [%d] append %s: %s\n", kv.me, key, kv.data[key])
 					err = OK
 				}
 				if _, ok := kv.cache[clientId]; !ok {
-					kv.cache[clientId] = new(Cache)
+					kv.cache[clientId] = new(RaftReply)
 				}
-				kv.cache[clientId].Seq = seq
-				kv.cache[clientId].Value = v
+				kv.cache[clientId].SeqNum = seq
+				kv.cache[clientId].Value = value
 				kv.cache[clientId].Err = err
 				if kv.maxraftstate != -1 && kv.maxraftstate < kv.ps.RaftStateSize() {
 					kv.rf.Snapshot(index, kv.encode())
@@ -220,7 +231,7 @@ func (kv *KVServer) executor() {
 			}
 			if ch, ok := kv.chanmap[getChanId(term, index)]; ok {
 				select {
-				case ch <- Done{index, term, v, err}:
+				case ch <- Done{index, term, value, err}:
 				default:
 				}
 			}
@@ -277,7 +288,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.ps = persister
 	kv.data = make(map[string]string)
-	kv.cache = make(map[int64]*Cache)
+	kv.cache = make(map[int64]*RaftReply)
 	kv.chanmap = make(map[int64]chan Done)
 
 	// Read from persister if any
