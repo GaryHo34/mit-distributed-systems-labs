@@ -1,27 +1,31 @@
 package kvraft
 
 import (
+	"crypto/rand"
+	"math/big"
 	"sync/atomic"
 	"time"
 
 	"6.5840/labrpc"
 )
 
-var id = int64(0)
-
 type Clerk struct {
-	servers  []*labrpc.ClientEnd
-	clientId int64
-	seqNum   int
-	leader   int32 // cache the leader
+	servers []*labrpc.ClientEnd
+	cid     int64
+	seq     int
+	leader  int32 // cache the leader
+}
+
+func nrand() int64 {
+	max := big.NewInt(int64(1) << 62)
+	bigx, _ := rand.Int(rand.Reader, max)
+	x := bigx.Int64()
+	return x
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
-	ck.servers = servers
-	ck.clientId = id
-	id++
-	ck.seqNum = 0
+	ck.servers, ck.cid, ck.seq = servers, nrand(), 0
 	return ck
 }
 
@@ -36,19 +40,17 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-	ck.seqNum++
+	ck.seq++
 
-	args := GetArgs{}
-	args.Key = key
-	args.ClientId = ck.clientId
-	args.SeqNum = ck.seqNum
+	args := new(GetArgs)
+	args.Key, args.Cid, args.Seq = key, ck.cid, ck.seq
 
 	leader := int(atomic.LoadInt32(&ck.leader))
 	for {
 		for i := 0; i < len(ck.servers); i++ {
 			peer := (leader + i) % len(ck.servers)
-			reply := GetReply{}
-			ok := ck.servers[peer].Call("KVServer.Get", &args, &reply)
+			reply := new(GetReply)
+			ok := ck.servers[peer].Call("KVServer.Get", args, reply)
 			if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 				atomic.StoreInt32(&ck.leader, int32(peer))
 				return reply.Value
@@ -67,21 +69,17 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	ck.seqNum++
+	ck.seq++
 
-	args := PutAppendArgs{}
-	args.OpStr = op
-	args.Key = key
-	args.Value = value
-	args.ClientId = ck.clientId
-	args.SeqNum = ck.seqNum
+	args := new(PutAppendArgs)
+	args.OpStr, args.Key, args.Value, args.Cid, args.Seq = op, key, value, ck.cid, ck.seq
 
 	leader := int(atomic.LoadInt32(&ck.leader))
 	for {
 		for i := 0; i < len(ck.servers); i++ {
 			peer := (leader + i) % len(ck.servers)
-			reply := PutAppendReply{}
-			ok := ck.servers[peer].Call("KVServer.PutAppend", &args, &reply)
+			reply := new(PutAppendReply)
+			ok := ck.servers[peer].Call("KVServer.PutAppend", args, reply)
 			if ok && reply.Err == OK {
 				atomic.StoreInt32(&ck.leader, int32(peer))
 				return

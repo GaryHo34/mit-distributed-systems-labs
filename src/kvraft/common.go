@@ -7,21 +7,23 @@ const (
 )
 
 type ClientInfo struct {
-	ClientId int64
-	SeqNum   int
+	Cid int64
+	Seq int
 }
 
 type Err string
+
+type RaftReply struct {
+	Value string
+	Err   Err
+}
 
 type GetArgs struct {
 	Key string
 	ClientInfo
 }
 
-type GetReply struct {
-	Value string
-	Err   Err
-}
+type GetReply = RaftReply
 
 // Put or Append
 type PutAppendArgs struct {
@@ -31,11 +33,9 @@ type PutAppendArgs struct {
 	ClientInfo
 }
 
-type PutAppendReply struct {
-	Err Err
-}
+type PutAppendReply = RaftReply
 
-type RaftReply struct {
-	ClientInfo
-	GetReply
+type Cache struct {
+	Seq int
+	RaftReply
 }
