@@ -28,46 +28,67 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+// Copy the config from old to new
+func (c *Config) Copy(cf *Config) {
+	c.Num = cf.Num
+	for i := 0; i < NShards; i++ {
+		c.Shards[i] = cf.Shards[i]
+	}
+	c.Groups = make(map[int][]string)
+	for k, v := range cf.Groups {
+		c.Groups[k] = append([]string{}, v...)
+	}
+}
+
 const (
 	OK = "OK"
 )
 
 type Err string
 
-type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+type ClientInfo struct {
+	Cid int64
+	Seq int
 }
 
-type JoinReply struct {
+type RaftReply struct {
 	WrongLeader bool
 	Err         Err
+}
+
+type JoinArgs struct {
+	Srvs map[int][]string // new GID -> servers mappings
+	ClientInfo
 }
 
 type LeaveArgs struct {
-	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
+	Gids []int
+	ClientInfo
 }
 
 type MoveArgs struct {
 	Shard int
-	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
+	Gid   int
+	ClientInfo
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	ConfNum int // desired config number
+	ClientInfo
 }
 
+type JoinReply = RaftReply
+
+type LeaveReply = RaftReply
+
+type MoveReply = RaftReply
+
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	Conf *Config
+	RaftReply
+}
+
+type Cache struct {
+	Seq int
+	QueryReply
 }

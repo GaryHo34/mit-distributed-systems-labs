@@ -1,0 +1,58 @@
+=== RUN   TestStaticShards5A
+Test (5A): static shards ...
+  ... Passed
+--- PASS: TestStaticShards5A (3.41s)
+=== RUN   TestRejection5A
+Test (5A): rejection ...
+  ... Passed
+--- PASS: TestRejection5A (3.91s)
+=== RUN   TestJoinLeave5B
+Test (5B): join then leave ...
+  ... Passed
+--- PASS: TestJoinLeave5B (2.58s)
+=== RUN   TestSnapshot5B
+Test (5B): snapshots, join, and leave ...
+  ... Passed
+--- PASS: TestSnapshot5B (4.51s)
+=== RUN   TestMissChange5B
+Test (5B): servers miss configuration changes...
+  ... Passed
+--- PASS: TestMissChange5B (7.50s)
+=== RUN   TestConcurrent1_5B
+Test (5B): concurrent puts and configuration changes...
+  ... Passed
+--- PASS: TestConcurrent1_5B (4.30s)
+=== RUN   TestConcurrent2_5B
+Test (5B): more concurrent puts and configuration changes...
+  ... Passed
+--- PASS: TestConcurrent2_5B (14.70s)
+=== RUN   TestConcurrent3_5B
+Test (5B): concurrent configuration change and restart...
+  ... Passed
+--- PASS: TestConcurrent3_5B (16.31s)
+=== RUN   TestUnreliable1_5B
+Test (5B): unreliable 1...
+  ... Passed
+--- PASS: TestUnreliable1_5B (8.99s)
+=== RUN   TestUnreliable2_5B
+Test (5B): unreliable 2...
+  ... Passed
+--- PASS: TestUnreliable2_5B (6.59s)
+=== RUN   TestUnreliable3_5B
+Test (5B): unreliable 3...
+  ... Passed
+--- PASS: TestUnreliable3_5B (5.51s)
+=== RUN   TestChallenge1Delete
+Test: shard deletion (challenge 1) ...
+  ... Passed
+--- PASS: TestChallenge1Delete (17.10s)
+=== RUN   TestChallenge2Unaffected
+Test: unaffected shard access (challenge 2) ...
+  ... Passed
+--- PASS: TestChallenge2Unaffected (5.20s)
+=== RUN   TestChallenge2Partial
+Test: partial migration shard access (challenge 2) ...
+  ... Passed
+--- PASS: TestChallenge2Partial (4.67s)
+PASS
+ok  	6.5840/shardkv	106.541s
